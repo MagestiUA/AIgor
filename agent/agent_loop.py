@@ -87,6 +87,30 @@ def _looks_like_leaked_tool_call(content: str) -> bool:
     return bool(content) and bool(_LEAKED_CALL_RE.search(content))
 
 
+# Живий кейс (gemma4, gather-фаза _run_tool_chat): модель пише НАРАТИВНО, що
+# збирається викликати тул ("I will call read_attachment for all 6 files
+# first.") — без structured tool_calls і без жодної JSON/XML-структури (тож
+# _looks_like_leaked_tool_call це не ловить) — і просто ЗУПИНЯЄТЬСЯ, нічого
+# не виконавши. Без цієї перевірки should_nudge бачить непорожній, "не
+# просочений" текст і вважає крок валідно завершеним — користувач бачить
+# "нічого не відбулось" (нуль тул-викликів, нуль відповіді по суті).
+_INTENT_PHRASE_RE = re.compile(
+    r"\b(?:I will|I['’]ll|I need to|I am going to|I['’]m going to|Let me)\s+call\b"
+    r"|спочатку\s+(?:виклич\w*|прочита\w*)"
+    r"|виклич\w*\s+(?:тул|read_|list_|run_|write_|edit_|web_)",
+    re.IGNORECASE,
+)
+_TOOL_IDENT_RE = re.compile(r'\b[a-z]+_[a-z_]+\b')
+
+
+def _announces_tool_intent(content: str) -> bool:
+    """True, якщо текст ОГОЛОШУЄ намір викликати тул (фраза-намір + згадка
+    snake_case ідентифікатора тула), але не є фактичним structured/просоченим
+    викликом — отже нічого насправді не станеться, якщо прийняти це як кінець кроку."""
+    return (bool(content) and bool(_INTENT_PHRASE_RE.search(content))
+            and bool(_TOOL_IDENT_RE.search(content)))
+
+
 def _extract_leaked_tool_call(content: str) -> dict | None:
     """Розпарсити просочений виклик тула з тексту (XML-теги чи голий JSON) у
     справжній tool_call dict — і ВИКОНАТИ дію одразу, замість ще одного nudge-раунду.
@@ -155,7 +179,9 @@ def should_nudge(content: str, already_nudged: bool) -> bool:
     просочилась як текст замість structured tool_calls — плутанина тегів
     <tool_call>/<tools>, бачено на qwen3-coder) і ще НЕ нюджили цього разу (рівно
     один nudge — щоб не зациклитись, якщо модель стабільно ламає формат)."""
-    return not already_nudged and (not content or _looks_like_leaked_tool_call(content))
+    return not already_nudged and (
+        not content or _looks_like_leaked_tool_call(content) or _announces_tool_intent(content)
+    )
 
 
 # Живий кейс: gemma4 (think=on) інколи НЕ розділяє content/thinking сама — Ollama

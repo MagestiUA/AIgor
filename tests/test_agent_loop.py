@@ -114,6 +114,20 @@ def main() -> None:
     assert "Готово" in final7, final7
     assert sum(1 for e in log7 if "read_attachment" in e) == 2, log7   # offset=0 + авто-продовження offset=32000
 
+    # Наративне оголошення наміру викликати тул без structured tool_calls
+    # ("I will call read_attachment for all 6 files first.") -> nudge -> дія.
+    # Живий кейс: gather-фаза _run_tool_chat — модель просто зупинялась тут,
+    # "нічого не відбувалось".
+    intent_then_call = LoopStub([
+        {"content": "I will call read_attachment for all 6 files first.", "tool_calls": []},
+        {"tool_calls": [{"function": {"name": "write_file",
+                                      "arguments": {"path": "after_intent.txt", "content": "ok"}}}]},
+        {"content": "Готово", "tool_calls": []},
+    ])
+    final8, log8 = run_step("створи after_intent.txt", ctx, client=intent_then_call, max_iters=5)
+    assert (root / "after_intent.txt").read_text(encoding="utf-8") == "ok", "nudge не витягнув крок (intent-only)"
+    assert "Готово" in final8
+
     # _looks_like_leaked_reasoning: живий кейс — gemma4 видала англомовний self-talk
     # ("Wait,"/"Self-Correction"/"*Actually*") прямо у видиму відповідь замість
     # чистого тексту -> 3+ маркери = просочення; звичайна відповідь (навіть з
