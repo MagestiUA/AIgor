@@ -21,7 +21,8 @@ from agent import chat_projects as CP
 from agent import session as sess
 from agent import topics
 from agent.agent_loop import (_estimate_iters, NUDGE_TEXT, pending_continuation,
-                              recover_tool_calls, should_nudge)
+                              recover_tool_calls, should_nudge,
+                              _looks_like_leaked_reasoning)
 from agent.answerer import build_context
 from agent.intent import classify_intent
 from agent.llm import OllamaClient
@@ -911,12 +912,27 @@ class State(rx.State):
         контенту — body порожній, хоч thinking — ні. Той самий клас бага, що
         порожні tool_calls у фазі збору (agent_loop.should_nudge), але тут це
         ОКРЕМА точка (синтез, не збір), тож власний, простіший retry: один
-        повторний прохід з прямим нагадуванням відповісти, перш ніж здаватись."""
+        повторний прохід з прямим нагадуванням відповісти, перш ніж здаватись.
+
+        Другий живий кейс: gemma4 (think=on) інколи НЕ розділяє content/thinking
+        сама (Ollama довіряє розділенню моделі, _stream_event лише читає готові
+        поля) — увесь монолог роздумів англійською ("Wait", "Self-Correction"
+        тощо, часто у фенс-блоці) потрапляє прямо в body. Це НЕ порожній body,
+        тож стара перевірка цей випадок не ловила — користувач бачив сирий хаос
+        замість відповіді. Тому додатково перевіряємо просочення евристикою
+        _looks_like_leaked_reasoning і так само перепитуємо ще раз."""
         body, thinking, _ = await self._run_stream(client.chat_stream(msgs, profile=profile))
         if not (body or "").strip():
             msgs.append({"role": "user", "content":
                 "Ти не дав фінальної відповіді (лише міркував). Дай КОНКРЕТНУ "
                 "відповідь користувачу зараз, без подальших роздумів."})
+            body, thinking, _ = await self._run_stream(client.chat_stream(msgs, profile=profile))
+        elif _looks_like_leaked_reasoning(body):
+            msgs.append({"role": "user", "content":
+                "Ти показав свої роздуми (самокорекції, службові позначки типу "
+                "\"Wait\"/\"Self-Correction\") прямо у відповіді замість чистого "
+                "тексту. Дай КОНКРЕТНУ фінальну відповідь користувачу зараз — без "
+                "жодних роздумів, самокорекцій чи службових позначок."})
             body, thinking, _ = await self._run_stream(client.chat_stream(msgs, profile=profile))
         return body, thinking
 

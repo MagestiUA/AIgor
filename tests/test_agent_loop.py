@@ -4,7 +4,7 @@
 import tempfile
 from pathlib import Path
 
-from agent.agent_loop import pending_continuation, run_step
+from agent.agent_loop import pending_continuation, run_step, _looks_like_leaked_reasoning
 from agent.toolkit import ToolContext
 
 
@@ -114,7 +114,17 @@ def main() -> None:
     assert "Готово" in final7, final7
     assert sum(1 for e in log7 if "read_attachment" in e) == 2, log7   # offset=0 + авто-продовження offset=32000
 
-    print("OK: tool-loop виконує тули через реєстр, завершується, ліміт ітерацій тримає, nudge витягує порожні/просочені відповіді, парсинг просочених викликів виконує дію напряму, pending_continuation тримає пагінацію великих файлів")
+    # _looks_like_leaked_reasoning: живий кейс — gemma4 видала англомовний self-talk
+    # ("Wait,"/"Self-Correction"/"*Actually*") прямо у видиму відповідь замість
+    # чистого тексту -> 3+ маркери = просочення; звичайна відповідь (навіть з
+    # одиничним випадковим "Wait") -> не просочення.
+    leaked_body = ('```text\nWait, let me reconsider.\nSelf-Correction: actually no.\n'
+                   '*Actually* I should re-check.\n```\nЗрозумів, ось відповідь.')
+    assert _looks_like_leaked_reasoning(leaked_body), leaked_body
+    assert not _looks_like_leaked_reasoning("Зрозумів, ось готова відповідь українською.")
+    assert not _looks_like_leaked_reasoning("Wait — це звичайне слово в коді, не просочення.")
+
+    print("OK: tool-loop виконує тули через реєстр, завершується, ліміт ітерацій тримає, nudge витягує порожні/просочені відповіді, парсинг просочених викликів виконує дію напряму, pending_continuation тримає пагінацію великих файлів, _looks_like_leaked_reasoning ловить просочений self-talk")
     print(f"  журнал кроку 1: {log}")
 
 

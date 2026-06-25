@@ -158,6 +158,23 @@ def should_nudge(content: str, already_nudged: bool) -> bool:
     return not already_nudged and (not content or _looks_like_leaked_tool_call(content))
 
 
+# Живий кейс: gemma4 (think=on) інколи НЕ розділяє content/thinking сама — Ollama
+# довіряє цьому розділенню моделі (llm._stream_event лише читає вже готові поля
+# message.content/message.thinking), а модель замість того запихає весь монолог
+# роздумів (англомовний self-talk, часто у фенс-блоці) прямо в content. На відміну
+# від should_nudge (порожній/просочений tool_call), тут content НЕ порожній — viewable
+# текст просто є хаосом роздумів замість відповіді. Маркери — англійські службові
+# фрази, які НЕ зʼявляються в нормальній українській відповіді користувачу.
+_LEAK_REASONING_MARKERS = ("Wait,", "*Wait*", "Self-Correction", "*Actually*",
+                            "*Correction:*", "Let me re-examine", "I need to re-examine")
+
+
+def _looks_like_leaked_reasoning(body: str) -> bool:
+    """3+ маркери self-talk у видимій відповіді -> модель просочила роздуми в content
+    замість чистої відповіді (а не просто раз згадала слово "wait" в іншому контексті)."""
+    return sum(body.count(m) for m in _LEAK_REASONING_MARKERS) >= 3
+
+
 # Останній read_attachment повертає явну підказку "лишилось N символів, виклич
 # read_attachment(name='X', offset=N)" (toolkit.h_read_attachment). Якщо модель після
 # цього НЕ зробила той виклик, а написала прозою щось типу "продовжую читати" — текстовий
