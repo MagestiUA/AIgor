@@ -906,13 +906,14 @@ class State(rx.State):
                 self._append("assistant", f"🔧 {name} · {label}", "step", thinking=shown)
 
     async def _synthesize_with_retry(self, msgs: list, client,
-                                     profile: dict = config.PLANNER) -> tuple[str, str]:
+                                     profile: dict = config.PLANNER,
+                                     max_attempts: int = 3) -> tuple[str, str]:
         """Стрім фінальної відповіді (think=on). Живий кейс: модель «застрягла» в
         роздумах (видно довгий thinking-монолог) і так і не дійшла до фінального
         контенту — body порожній, хоч thinking — ні. Той самий клас бага, що
         порожні tool_calls у фазі збору (agent_loop.should_nudge), але тут це
-        ОКРЕМА точка (синтез, не збір), тож власний, простіший retry: один
-        повторний прохід з прямим нагадуванням відповісти, перш ніж здаватись.
+        ОКРЕМА точка (синтез, не збір), тож власний, простіший retry: повторні
+        проходи з прямим нагадуванням відповісти, перш ніж здаватись.
 
         Другий живий кейс: gemma4 (think=on) інколи НЕ розділяє content/thinking
         сама (Ollama довіряє розділенню моделі, _stream_event лише читає готові
@@ -920,19 +921,27 @@ class State(rx.State):
         тощо, часто у фенс-блоці) потрапляє прямо в body. Це НЕ порожній body,
         тож стара перевірка цей випадок не ловила — користувач бачив сирий хаос
         замість відповіді. Тому додатково перевіряємо просочення евристикою
-        _looks_like_leaked_reasoning і так само перепитуємо ще раз."""
+        _looks_like_leaked_reasoning.
+
+        max_attempts=3 (не 2): живцем бачили, що на ВАЖКІЙ задачі (синтез 6
+        файлів зі складними правилами джерел) ОДИН retry просочується знову й
+        зрештою повертає (порожня відповідь) — модель просто не тягне задачу за
+        один прохід синтезу. Третя спроба з тим самим нагадуванням іноді
+        витягує чисту відповідь; якщо й вона не вийде — приймаємо що є (краще
+        ніж нескінченний цикл)."""
         body, thinking, _ = await self._run_stream(client.chat_stream(msgs, profile=profile))
-        if not (body or "").strip():
-            msgs.append({"role": "user", "content":
-                "Ти не дав фінальної відповіді (лише міркував). Дай КОНКРЕТНУ "
-                "відповідь користувачу зараз, без подальших роздумів."})
-            body, thinking, _ = await self._run_stream(client.chat_stream(msgs, profile=profile))
-        elif _looks_like_leaked_reasoning(body):
-            msgs.append({"role": "user", "content":
-                "Ти показав свої роздуми (самокорекції, службові позначки типу "
-                "\"Wait\"/\"Self-Correction\") прямо у відповіді замість чистого "
-                "тексту. Дай КОНКРЕТНУ фінальну відповідь користувачу зараз — без "
-                "жодних роздумів, самокорекцій чи службових позначок."})
+        for _ in range(max_attempts - 1):
+            if (body or "").strip() and not _looks_like_leaked_reasoning(body):
+                break
+            if not (body or "").strip():
+                nudge = ("Ти не дав фінальної відповіді (лише міркував). Дай КОНКРЕТНУ "
+                          "відповідь користувачу зараз, без подальших роздумів.")
+            else:
+                nudge = ("Ти показав свої роздуми (самокорекції, службові позначки типу "
+                          "\"Wait\"/\"Self-Correction\") прямо у відповіді замість чистого "
+                          "тексту. Дай КОНКРЕТНУ фінальну відповідь користувачу зараз — без "
+                          "жодних роздумів, самокорекцій чи службових позначок.")
+            msgs.append({"role": "user", "content": nudge})
             body, thinking, _ = await self._run_stream(client.chat_stream(msgs, profile=profile))
         return body, thinking
 
