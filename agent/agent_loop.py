@@ -111,6 +111,26 @@ def _announces_tool_intent(content: str) -> bool:
             and bool(_TOOL_IDENT_RE.search(content)))
 
 
+def extract_intended_attachments(content: str, known_names: list[str]) -> list[str]:
+    """Живий кейс (gather-фаза _run_tool_chat, важка багатофайлова задача):
+    should_nudge дає лише ОДИН nudge на всю фазу збору (щоб не зациклитись), але
+    слабка модель стабільно повторює саме _announces_tool_intent навіть ПІСЛЯ
+    нього — другий раз should_nudge мовчить (already_nudged), цикл просто
+    `break`-ається БЕЗ жодних прочитаних даних -> "(порожня відповідь)" у фіналі.
+
+    Текстовий nudge тут принципово ненадійний (та сама причина, що й
+    pending_continuation для пагінації) — модель отримала реальні імена файлів
+    через attachments_note і просто ЦИТУЄ їх у своєму "I will call..." реченні.
+    Раз імена вже відомі (known_names — фактичні файли на диску) — виконуємо
+    намір моделі НАПРЯМУ: повертає підмножину known_names, згадану в content
+    (порядок як у known_names), або весь known_names, якщо жодне ім'я текстуально
+    не співпало (типовий випадок — "усіх N файлів" без перерахування)."""
+    if not known_names:
+        return []
+    mentioned = [n for n in known_names if n in content]
+    return mentioned or list(known_names)
+
+
 def _extract_leaked_tool_call(content: str) -> dict | None:
     """Розпарсити просочений виклик тула з тексту (XML-теги чи голий JSON) у
     справжній tool_call dict — і ВИКОНАТИ дію одразу, замість ще одного nudge-раунду.

@@ -22,7 +22,8 @@ from agent import session as sess
 from agent import topics
 from agent.agent_loop import (_estimate_iters, NUDGE_TEXT, pending_continuation,
                               recover_tool_calls, should_nudge,
-                              _looks_like_leaked_reasoning)
+                              _looks_like_leaked_reasoning,
+                              extract_intended_attachments)
 from agent.answerer import build_context
 from agent.intent import classify_intent
 from agent.llm import OllamaClient
@@ -977,8 +978,28 @@ class State(rx.State):
                     # дочитуємо БЕЗ її участі (текстовий nudge ненадійний, бачили живцем
                     # 15+ ідентичних повторів "продовжую читати" без жодної дії).
                     cont = pending_continuation(msgs)
+                    # Модель НАРАТИВНО оголошує намір прочитати вкладення ("I will call
+                    # read_attachment for all 6 files first.") і просто зупиняється —
+                    # should_nudge дає лише ОДИН nudge на всю фазу збору, а слабка
+                    # модель на важкій багатофайловій задачі стабільно повторює це
+                    # навіть ПІСЛЯ нього (другий раз should_nudge мовчить через
+                    # already_nudged) -> break без жодних даних -> "(порожня відповідь)"
+                    # у фіналі (живий кейс). Імена файлів модель отримала через
+                    # attachments_note — то й виконуємо її намір НАПРЯМУ, без надії на
+                    # повторну співпрацю. Перевіряємо ще й буквальну згадку
+                    # "read_attachment", щоб не зачепити намір про ІНШИЙ тул (run_shell тощо).
+                    known = ([p.name for p in Path(tctx.attachments_dir).iterdir() if p.is_file()]
+                             if tctx.attachments_dir and Path(tctx.attachments_dir).is_dir() else [])
+                    intended = (extract_intended_attachments(content, known)
+                                if known and "read_attachment" in content else [])
                     if cont is not None:
                         tool_calls, recovered = [cont], True
+                    elif intended:
+                        tool_calls, recovered = (
+                            [{"function": {"name": "read_attachment", "arguments": {"name": n}}}
+                             for n in intended],
+                            True,
+                        )
                     # Якщо контент непорожній і не просочений — це справді "досить
                     # зібрано, йду відповідати" (валідний ранній вихід). Інакше раніше
                     # цикл просто `break`-ався без жодних зібраних даних (типово —
