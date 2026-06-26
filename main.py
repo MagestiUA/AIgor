@@ -80,10 +80,16 @@ def _run_reflex_inplace(extra_args: list[str]) -> None:
     cli()
 
 
-def _start_server(extra_args: list[str]) -> tuple[subprocess.Popen, "queue.Queue[str]"]:
+OLLAMA_PID_RE = re.compile(r"OLLAMA_SERVER_PID:(\d+)")
+
+
+def _start_server(extra_args: list[str]) -> tuple[subprocess.Popen, "queue.Queue[str]", dict]:
     """Підняти сервер як дочірній процес (python main.py --dev ...). Фоновий
     потік читає його stdout: друкує кожен рядок (логи лишаються видимі в
-    консолі) і виловлює рядок "App running at: <url>" із РЕАЛЬНИМ портом."""
+    консолі), виловлює рядок "App running at: <url>" із РЕАЛЬНИМ портом і
+    рядок "OLLAMA_SERVER_PID:<pid>" (agent.llm._ensure_server) — щоб мати PID
+    Ollama-сервера й завершити його при виході (лише якщо ЦЕЙ запуск його й
+    підняв; srv_state["ollama_pid"] лишається None, якщо Ollama вже працював)."""
     env = {**os.environ, "REFLEX_TELEMETRY_ENABLED": "false", "PYTHONIOENCODING": "utf-8"}
     proc = subprocess.Popen(
         [sys.executable, str(ROOT / "main.py"), "--dev", *extra_args],
@@ -91,6 +97,7 @@ def _start_server(extra_args: list[str]) -> tuple[subprocess.Popen, "queue.Queue
         text=True, bufsize=1,
     )
     url_q: "queue.Queue[str]" = queue.Queue(maxsize=1)
+    srv_state: dict = {"ollama_pid": None}
     found = False
 
     def _pump() -> None:
@@ -102,19 +109,44 @@ def _start_server(extra_args: list[str]) -> tuple[subprocess.Popen, "queue.Queue
                 if m:
                     found = True
                     url_q.put(m.group(1))
+            m2 = OLLAMA_PID_RE.search(line)
+            if m2:
+                srv_state["ollama_pid"] = int(m2.group(1))
         if not found:
             url_q.put("")   # процес завершився, не дочекавшись рядка з URL
 
     threading.Thread(target=_pump, daemon=True).start()
-    return proc, url_q
+    return proc, url_q, srv_state
+
+
+def _kill_tree(pid: int) -> None:
+    """Завершити процес РАЗОМ з усім його деревом дочірніх процесів (Windows:
+    taskkill /T). Звичайний proc.terminate()/kill() вбиває лише ОДИН PID — Reflex
+    сам підіймає frontend (Bun/Next.js dev-сервер) як СВІЙ дочірній процес, і він
+    лишається осиротілим/висить у Task Manager (живий кейс: процес "Bun" після
+    закриття застосунку, навіть коли консоль уже сказала "Process finished")."""
+    try:
+        subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 def _stop_server(proc: subprocess.Popen) -> None:
-    proc.terminate()
+    _kill_tree(proc.pid)
     try:
         proc.wait(timeout=10)
     except subprocess.TimeoutExpired:
         proc.kill()
+
+
+def _stop_ollama(pid: int | None) -> None:
+    """Завершити Ollama, але ЛИШЕ якщо ЦЕЙ запуск застосунку сам її підняв (pid
+    прийшов через OLLAMA_SERVER_PID у логах бекенда) — якщо Ollama вже працювала
+    до старту застосунку, pid тут None і ми її не чіпаємо (могла бути потрібна
+    іншим програмам)."""
+    if pid:
+        _kill_tree(pid)
 
 
 def main() -> None:
@@ -125,7 +157,7 @@ def main() -> None:
 
     if "--backend-port" not in extra:
         extra = [*extra, "--backend-port", str(DEFAULT_BACKEND_PORT)]
-    proc, url_q = _start_server(extra)
+    proc, url_q, srv_state = _start_server(extra)
     try:
         try:
             url = url_q.get(timeout=STARTUP_TIMEOUT)
@@ -148,6 +180,7 @@ def main() -> None:
         webview.start()
     finally:
         _stop_server(proc)
+        _stop_ollama(srv_state.get("ollama_pid"))
 
 
 if __name__ == "__main__":

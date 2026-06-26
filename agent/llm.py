@@ -49,12 +49,18 @@ class OllamaClient:
         # Діє лише коли МИ піднімаємо сервер — якщо ollama serve вже запущено ззовні
         # (напр. іншим клієнтом), його env не змінюємо.
         env = {**os.environ, "OLLAMA_FLASH_ATTENTION": "1", "OLLAMA_KV_CACHE_TYPE": "q4_0"}
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["ollama", "serve"],
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
             env=env,
         )
+        # main.py піднімає НАС (Reflex-бекенд) як дочірній процес і парсить наш
+        # stdout рядково (так само, як шукає "App running at: ..."), щоб мати PID
+        # сервера Ollama й завершити його при закритті застосунку. Друкуємо ЛИШЕ
+        # тут, коли МИ САМІ підняли сервер — якщо він уже працював ззовні (early
+        # return вище), main.py нічого не отримає й не торкне чужий інстанс.
+        print(f"OLLAMA_SERVER_PID:{proc.pid}", flush=True)
         for _ in range(retries):
             time.sleep(delay)
             try:
