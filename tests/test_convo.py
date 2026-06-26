@@ -85,8 +85,19 @@ def main() -> None:
                              client=Stub(["y" * 200_000, "СТИСНУТО"]), budget=1000)
     assert d3 == "СТИСНУТО", repr(d3)
 
+    # generate_title: звичайна відповідь -> чиста назва; echo заголовка ("Title:")
+    # обрізаємо; задовгий "title" (модель розговорилась) -> "" (caller лишає дефолт).
+    t1 = convo.generate_title("як виправити memory leak в Python", client=Stub(["Memory leak у Python"]))
+    assert t1 == "Memory leak у Python", repr(t1)
+    t_echo = convo.generate_title("щось", client=Stub(["Title: Чиста назва"]))
+    assert t_echo == "Чиста назва", repr(t_echo)
+    t_long = convo.generate_title("щось", client=Stub(["x" * 200]))
+    assert t_long == "", repr(t_long)
+    t_empty = convo.generate_title("щось", client=Stub(["(порожньо)"]))
+    assert t_empty == "", repr(t_empty)
+
     print("OK: convo — епізоди, дописування, стиснення за бюджетом, порожній епізод, as_context, "
-          "chat/code kind різні промпти, update_digest шматків")
+          "chat/code kind різні промпти, update_digest шматків, generate_title (чиста/echo/задовга/порожня)")
 
 
 if __name__ == "__main__":

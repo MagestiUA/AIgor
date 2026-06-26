@@ -1200,6 +1200,32 @@ class State(rx.State):
         # Фінальний синтез усе одно think=on (у _run_tool_chat).
         return await self._run_tool_chat(msgs, tctx, client, rounds, gather_first=True)
 
+    async def _maybe_auto_title(self, user_text: str, client):
+        """Автоперейменування "Новий чат" -> коротка осмислена назва за першим
+        повідомленням (convo.generate_title), один раз. Той самий cid-гард, що й
+        _update_summary — поки летів LLM-виклик, користувач міг перемкнути чат.
+        Дешевий некритичний виклик: будь-яка проблема (порожній результат,
+        кривий title) -> просто лишаємо дефолтну назву, без retry/нюджів."""
+        async with self:
+            cid = self.current_id
+            chat = self.mode == "chat"
+            still_default = self.title in ("", "Новий чат")
+        if not still_default:
+            return
+        title = await asyncio.to_thread(
+            lambda: convo.generate_title(user_text, client, kind="chat" if chat else "code"))
+        if not title:
+            return
+        async with self:
+            if self.current_id == cid:
+                self.title = title
+            if cid:
+                s = sess.load_session(cid)
+                if s.title in ("", "Новий чат"):
+                    s.title = title
+                    sess.save_session(s)
+                    self.sessions = sess.list_sessions()
+
     async def _update_summary(self, user_text: str, outcome: str):
         """Оновлення контекст-памʼяті (LLM-підсумок) після завершеного запиту. Модель
         однопотокова, тож це триває в межах busy; нові повідомлення стають у чергу
@@ -1408,6 +1434,7 @@ class State(rx.State):
                     text, convo.as_context(summary) + struct, doc, [], root, plan_first, client)
 
         if (so or "").strip():
+            await self._maybe_auto_title(text, client)
             async with self:
                 self.status = "Оновлюю памʼять…"
             await self._update_summary(su, so)

@@ -66,6 +66,31 @@ def _profile_for(kind: str) -> dict:
     return config.CHAT_EXECUTOR if kind == "chat" else config.EXECUTOR
 
 
+_TITLE_SYSTEM = (
+    "Give a short, specific title (3-6 words, no quotes, no trailing punctuation) for a chat "
+    "that starts with the following user message. Same language as the message. Reply with "
+    "ONLY the title, nothing else — no explanations, no labels."
+)
+
+
+def generate_title(user_text: str, client: OllamaClient | None = None, kind: str = "code") -> str:
+    """Коротка осмислена назва чату (3-6 слів) за першим повідомленням — заміна
+    дефолтного "Новий чат". think=off (_profile_for), без тулів, один дешевий
+    виклик. Не критичний механізм — якщо модель видала сміття/echo/задовгий
+    текст, повертаємо "" (caller лишає дефолтну назву, без retry)."""
+    client = client or OllamaClient()
+    msg = client.chat(
+        [{"role": "system", "content": _TITLE_SYSTEM},
+         {"role": "user", "content": user_text[:2000]}],
+        profile=_profile_for(kind),
+    )
+    title = _strip_echoed_label((msg.get("content") or "").strip(), "Title", "Назва", "Назва чату")
+    title = title.strip(" \"'`*#").splitlines()[0].strip() if title else ""
+    if not title or _is_empty_echo(title) or len(title) > 80:
+        return ""
+    return title
+
+
 def summarize_turn(user_text: str, outcome: str, client: OllamaClient | None = None,
                    kind: str = "code") -> str:
     """Стислий епізод одного запиту (що просили + що зроблено). kind="code"|"chat"."""
