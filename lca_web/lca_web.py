@@ -1094,6 +1094,21 @@ class State(rx.State):
                          + "; ".join(others))
         return content + "\n\n" + "\n".join(lines) + "]"
 
+    @staticmethod
+    def _attach_or_reference(cid: str, content: str, cur_names: list, other_names: list) -> tuple[str, bool]:
+        """Якщо файли цього повідомлення (cur_names) РАЗОМ малі (A.INLINE_BUDGET) —
+        вшити їхній ВМІСТ напряму в текст (один LLM-виклик, без тул-циклу читання).
+        Інакше — лишити посилання на тул read_attachment, як і для other_names.
+        Повертає (новий_текст, чи_лишились_файли_що_потребують_тула)."""
+        cur = [n for n in (cur_names or []) if n]
+        others = [n for n in (other_names or []) if n]
+        if cur and A.total_size(cid, cur) <= A.INLINE_BUDGET:
+            inlined = A.read_combined(cid, cur)
+            content = content + "\n\n[Вкладені файли цього повідомлення — вміст нижче]\n" + inlined
+            cur = []
+        new_content = State._inject_files(content, cur, others)
+        return new_content, bool(cur or others)
+
     async def _chat_reply(self, text: str, client, att_note: str = "") -> str:
         """Чат-режим: думаюча модель + read-only тули. У поточну user-репліку вшиваємо
         імена файлів, прикріплених САМЕ до неї (m['attachments']); модель читає їх через
@@ -1110,10 +1125,15 @@ class State(rx.State):
         project_block = CP.as_system_block(proj.prompt) if proj else ""
         all_names = [n["name"] for n in A.list_saved(cid)]
         other_names = [n for n in all_names if n not in cur_atts]
+        needs_tool_files = bool(other_names)
         # Вшити переліки файлів у ОСТАННЮ user-репліку (поточний хід), якщо файли є.
+        # cur_atts (файли САМЕ цього повідомлення) вшиваються ВМІСТОМ напряму, якщо
+        # сумарно малі (A.INLINE_BUDGET) — без жодного read_attachment-раунду;
+        # other_names лишаються лише посиланням (тулом, "якщо запит саме про них").
         if all_names and history and history[-1]["role"] == "user":
-            history[-1] = {**history[-1],
-                           "content": self._inject_files(history[-1]["content"], cur_atts, other_names)}
+            new_content, needs_tool_files = self._attach_or_reference(
+                cid, history[-1]["content"], cur_atts, other_names)
+            history[-1] = {**history[-1], "content": new_content}
         tctx = ToolContext(root=A.session_dir(cid),
                            permissions={"edits": "off", "shell": "off"}, client=client,
                            attachments_dir=A.session_dir(cid))
@@ -1125,13 +1145,14 @@ class State(rx.State):
         msgs = [{"role": "system", "content": system}] + history
         rounds = await self._estimate_rounds(text, cur_atts or all_names, client,
                                              profile=config.CHAT_EXECUTOR, cid=cid)
-        # think=off-збір, коли в сесії Є файли ЧИ доступні теми минулих розмов — щоб
-        # модель НАДІЙНО викликала read_attachment/read_topic (think=on часто «думає»
-        # про тул, але не викликає). Чистий чат без файлів/тем → think=on-стрім без
-        # зайвого збору. gather_profile=CHAT_EXECUTOR (gemma) — chat-режим не торкає
-        # кодинг-модель.
+        # think=off-збір ПОТРІБЕН лише якщо ЛИШИЛИСЬ файли/теми, що читаються тулом
+        # (other_names чи topics) — інакше модель НАДІЙНО викликала б read_attachment
+        # (think=on часто «думає» про тул, але не викликає). Якщо все вже вшито
+        # напряму (needs_tool_files=False, без тем) — прямий think=on-стрім без
+        # зайвого тул-циклу взагалі: саме та "обробка за один виклик", яку просили.
+        # gather_profile=CHAT_EXECUTOR (gemma) — chat-режим не торкає кодинг-модель.
         return await self._run_tool_chat(msgs, tctx, client, rounds,
-                                         gather_first=bool(all_names or all_topics),
+                                         gather_first=bool(needs_tool_files or all_topics),
                                          gather_profile=config.CHAT_EXECUTOR)
 
     # Системний промпт answer-режиму В ТУЛ-ЦИКЛІ: на відміну від answerer.SYSTEM, явно
@@ -1165,7 +1186,9 @@ class State(rx.State):
                            attachments_dir=A.session_dir(cid))
         all_names = [n["name"] for n in A.list_saved(cid)]
         other_names = [n for n in all_names if n not in cur_atts]
-        question = self._inject_files(text, cur_atts, other_names)
+        # cur_atts малі сумарно -> вшиваємо вмістом напряму (менше тул-раундів);
+        # answer-режим однаково forced gather_first=True нижче (читає й код проєкту).
+        question, _ = self._attach_or_reference(cid, text, cur_atts, other_names)
         parts = [f"Контекст:\n{ctx}" if ctx else "", f"Питання:\n{question}"]
         user = "\n\n".join(p for p in parts if p)
         msgs = [{"role": "system", "content": ANSWER_SYSTEM},

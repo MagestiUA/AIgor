@@ -132,6 +132,35 @@ def list_saved(session_id: str) -> list[dict]:
             for p in sorted(d.iterdir()) if p.is_file()]
 
 
+def total_size(session_id: str, names: list[str]) -> int:
+    """Сумарний розмір (байти) перелічених вкладень сесії."""
+    sizes = {n["name"]: n["size"] for n in list_saved(session_id)}
+    return sum(sizes.get(n, 0) for n in names)
+
+
+# Сумарний бюджет для "вшити напряму в повідомлення замість тул-циклу" — навмисно
+# той самий розмір, що toolkit.ATTACHMENT_CHUNK_SIZE (один read_attachment-виклик).
+# Якщо ВСІ прикріплені до повідомлення файли РАЗОМ вкладаються в цей бюджет, немає
+# сенсу гнати модель через багатораундовий тул-цикл (read_attachment на кожен файл
+# окремо) — а саме там живцем бачили нові й нові варіанти одного бага (слабка модель
+# то нюджиться вкрай ненадійно, то лише оголошує намір замість виклику, то губить
+# точні цифри в дайджесті). Один LLM-виклик з усім вмістом одразу — і цих класів
+# багів просто немає, бо немає самого тул-циклу.
+INLINE_BUDGET = 32_000
+
+
+def read_combined(session_id: str, names: list[str]) -> str:
+    """Прочитати кілька вкладень одразу й зклеїти в один блок (без тула
+    read_attachment) — для inline-випадку, коли сумарний розмір малий."""
+    d = session_dir(session_id)
+    parts = []
+    for n in names:
+        p = d / _safe_name(n)
+        if p.is_file():
+            parts.append(f"=== {n} ===\n{p.read_text(encoding='utf-8', errors='replace')}")
+    return "\n\n".join(parts)
+
+
 def attachments_note(session_id: str, meta_list: list[dict]) -> str:
     """Контекстний блок для моделі: імена прикріплених файлів (БЕЗ вмісту). Модель
     читає потрібні через тул read_attachment(name) — він знаходить файл за іменем у

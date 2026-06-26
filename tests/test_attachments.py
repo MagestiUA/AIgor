@@ -6,6 +6,7 @@ import shutil
 from agent.attachments import (
     classify, process, session_dir, save, remove, clear, rename_session,
     list_saved, attachments_note, CHAR_BUDGET, MAX_FILE_SIZE,
+    total_size, read_combined, INLINE_BUDGET,
 )
 
 SID = "_test_session_xyz"
@@ -75,6 +76,22 @@ def main():
         # list_saved на відсутній теці → []
         assert list_saved("nope_nonexistent") == []
 
+        # total_size / read_combined: для inline-фічі ("обробити кілька малих
+        # вкладень за один LLM-виклик замість тул-циклу на кожен файл окремо")
+        save(SID2, "b.txt", "BBBB")
+        # (не хардкодимо байти "print(1)\n" — write_text транслює \n у платформний
+        # лінкінд, тож звіряємось проти суми, а не літералу)
+        assert total_size(SID2, ["main.py", "b.txt"]) == \
+            total_size(SID2, ["main.py"]) + total_size(SID2, ["b.txt"]) > 0
+        assert total_size(SID2, ["nope.txt"]) == 0
+        combined = read_combined(SID2, ["main.py", "b.txt"])
+        assert "=== main.py ===\nprint(1)\n" in combined
+        assert "=== b.txt ===\nBBBB" in combined
+        assert combined.index("main.py") < combined.index("b.txt")   # порядок як у names
+        assert read_combined(SID2, ["nope.txt"]) == ""   # неіснуючий файл -> пропускаємо
+        assert total_size(SID2, ["main.py", "b.txt"]) < INLINE_BUDGET
+        remove(SID2, "b.txt")
+
         # read_attachment: нечіткий пошук за іменем у теці вкладень
         from agent.toolkit import ToolContext, h_read_attachment
         ctx = ToolContext(root=session_dir(SID2), attachments_dir=session_dir(SID2))
@@ -94,7 +111,7 @@ def main():
 
     print("OK: attachments — classify, process, save/list_saved/remove/clear, "
           "rename_session, attachments_note, read_attachment (нечіткий пошук), "
-          "traversal-захист")
+          "traversal-захист, total_size/read_combined (inline-бюджет)")
 
 
 if __name__ == "__main__":
