@@ -1825,24 +1825,38 @@ def sidebar() -> rx.Component:
         project_section(),
         rx.cond(
             State.is_chat & (State.current_project_id != ""),
-            rx.hstack(
-                rx.icon("arrow-left", size=12),
-                rx.text("Усі чати", class_name="text-xs"),
-                on_click=lambda: State.select_project(""),
-                class_name="items-center gap-1 text-gray-500 hover:text-gray-200 cursor-pointer "
-                           "px-2 mt-3",
+            rx.fragment(
+                rx.hstack(
+                    rx.icon("arrow-left", size=12),
+                    rx.text("Усі чати", class_name="text-xs"),
+                    on_click=lambda: State.select_project(""),
+                    class_name="items-center gap-1 text-gray-500 hover:text-gray-200 cursor-pointer "
+                               "px-2 mt-3",
+                ),
+                # "+ Новий чат" САМЕ в межах поточного проекту — між назвою проекту
+                # (вище, в project_section) і списком його чатів (нижче); відокремлено
+                # від загального "+ Новий чат" нагорі, який теж створює в поточному
+                # проекті (State.new_chat вже враховує current_project_id), але тут це
+                # видно в контексті, без потреби гортати сайдбар нагору.
+                rx.hstack(
+                    rx.icon("plus", size=12),
+                    rx.text("Новий чат", class_name="text-xs"),
+                    on_click=State.new_chat,
+                    class_name="items-center gap-1 text-gray-500 hover:text-gray-200 cursor-pointer "
+                               "px-2 mt-1.5",
+                ),
             ),
-            rx.fragment(),
+            rx.text("Recents", class_name=rx.cond(State.is_chat, "mt-2", "mt-5")
+                    + " text-xs text-gray-500 uppercase tracking-wide mb-1 px-2"),
         ),
-        rx.text("Recents", class_name=rx.cond(State.is_chat, "mt-2", "mt-5")
-                + " text-xs text-gray-500 uppercase tracking-wide mb-1 px-2"),
         rx.vstack(
             rx.cond(
                 State.visible_sessions,
                 rx.foreach(State.visible_sessions, session_item),
                 rx.text("Поки немає чатів", class_name="text-sm text-gray-400 px-2"),
             ),
-            class_name="flex-1 w-full gap-0.5 overflow-y-auto",
+            class_name=rx.cond(State.is_chat & (State.current_project_id != ""), "pl-3", "")
+            + " flex-1 w-full gap-0.5 overflow-y-auto mt-1",
         ),
         rx.spacer(),
         # self-start: не розтягувати на всю ширину колонки (інакше контур-пігулка йде
