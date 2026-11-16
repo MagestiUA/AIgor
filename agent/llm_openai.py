@@ -27,6 +27,7 @@ import uuid
 import requests
 
 from . import config
+from . import logs
 
 _RETRY_STATUS = {429, 502, 503, 504, 520, 521, 522, 523, 524}
 _PASS_OPTIONS = ("top_p", "top_k", "min_p", "seed")
@@ -137,13 +138,16 @@ class OpenAIClient:
                                   timeout=(10, config.REQUEST_TIMEOUT))
                 if r.status_code in _RETRY_STATUS:
                     self.last_error = f"HTTP {r.status_code}"
+                    logs.get("llm").warning("сервер відповів %s — повтор через %.0fс", r.status_code, self.retry_delay)
                     r.close()
                 else:
                     self.last_error = ""
                     return r
             except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                 self.last_error = str(e)
+                logs.get("llm").warning("немає зʼєднання з %s: %s — повтор", self.base_url, type(e).__name__)
             if time.monotonic() + self.retry_delay > deadline:
+                logs.get("llm").error("сервер не відповів за %.0fс (%s)", self.wake_timeout, self.last_error)
                 raise RuntimeError(f"LLM-сервер не відповідає ({self.last_error}). Можливо, він у "
                                    "гібернації або ваш IP не доданий у фаєрвол.")
             time.sleep(self.retry_delay)
@@ -156,6 +160,8 @@ class OpenAIClient:
              profile: dict = config.EXECUTOR, fmt: str | dict | None = None) -> dict:
         t0 = time.monotonic()
         r = self._post_with_retry(self._payload(messages, tools, profile, fmt, stream=False))
+        if not r.ok:
+            logs.get("llm").error("HTTP %s від %s: %s", r.status_code, self.base_url, r.text[:300])
         r.raise_for_status()
         data = r.json()
         msg = data["choices"][0]["message"]
@@ -165,6 +171,9 @@ class OpenAIClient:
         self.last_stats = {"prompt": usage.get("prompt_tokens", 0) or 0,
                            "out": usage.get("completion_tokens", 0) or 0,
                            "eval_ns": int((time.monotonic() - t0) * 1e9), "model": self.model}
+        logs.get("llm").info("chat ok model=%s msgs=%d tools=%d think=%s prompt=%d out=%d %.1fс",
+                             self.model, len(messages), len(tools or []), bool(profile.get("think")),
+                             self.last_stats["prompt"], self.last_stats["out"], time.monotonic() - t0)
         out = {"role": "assistant", "content": content}
         if thinking:
             out["thinking"] = thinking
@@ -210,6 +219,10 @@ class OpenAIClient:
                         t_first = t_first or time.monotonic()
                         yield {"content": content, "thinking": thinking, "done": False}
         elapsed = time.monotonic() - (t_first or t0)
+        logs.get("llm").info("stream ok model=%s msgs=%d tools=%d think=%s prompt=%d out=%d %.1fс",
+                             self.model, len(messages), len(tools or []), bool(profile.get("think")),
+                             usage.get("prompt_tokens", 0) or 0, usage.get("completion_tokens", 0) or 0,
+                             time.monotonic() - t0)
         self.last_stats = {"prompt": usage.get("prompt_tokens", 0) or 0,
                            "out": usage.get("completion_tokens", 0) or 0,
                            "eval_ns": int(elapsed * 1e9), "model": self.model}

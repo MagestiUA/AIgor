@@ -18,6 +18,7 @@ from agent import attachments as A
 from agent import config
 from agent import convo
 from agent import limits
+from agent import logs
 from agent import chat_projects as CP
 from agent import session as sess
 from agent import topics
@@ -42,6 +43,8 @@ CHAT_SYSTEM = (
 )
 
 _CLIENT = None
+logs.setup("igor")     # файл із ротацією ~/.local-code-agent/logs/igor.log
+_log = logs.get("app")
 
 # Очікувані confirm-и shell=ask, поза State (asyncio.Event не серіалізується). Ключ —
 # id сесії. {sid: {"event": asyncio.Event, "ok": bool}}. Резолвить confirm_yes/no.
@@ -656,6 +659,9 @@ class State(rx.State):
         if self.llm_key_input.strip():
             new["llm_api_key"] = self.llm_key_input.strip()
         S.save(new)
+        _log.info("налаштування підключення: backend=%s host=%s port=%s model=%s ключ_змінено=%s",
+                  new["llm_backend"], new["llm_host"], new["llm_port"], new["llm_model"],
+                  bool(self.llm_key_input.strip()))
         reset_client()
         self.llm_key_input = ""
         self.llm_key_saved = bool(new.get("llm_api_key"))
@@ -1463,6 +1469,7 @@ class State(rx.State):
         try:
             await self._process_one_inner(text)
         except Exception as e:
+            _log.exception("збій обробки повідомлення")
             async with self:
                 self.has_pending = False
                 self.has_question = False
@@ -2460,5 +2467,5 @@ def index() -> rx.Component:
 app = rx.App(
     stylesheets=["https://fonts.googleapis.com/css2?family=Newsreader:ital@0;1&display=swap"],
 )
-app.add_page(index, title="local-code-agent",
+app.add_page(index, title="Ігорь!",
              on_load=[State.load_sessions, State.load_settings])

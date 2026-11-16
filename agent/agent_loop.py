@@ -11,6 +11,7 @@ import re
 
 from . import config
 from . import limits
+from . import logs
 from .llm import OllamaClient
 from .toolkit import ToolContext, ToolRegistry, default_registry
 
@@ -312,6 +313,7 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
             # самому виводі навіть при повторі (перевірено живцем). Див. should_nudge.
             elif should_nudge(content, nudged):
                 nudged = True
+                logs.get("agent").info("nudge: порожня/просочена відповідь без tool_calls")
                 messages.append({"role": "user", "content": NUDGE_TEXT})
                 continue
             else:
@@ -330,4 +332,5 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
                 on_tool(name, args, result)
             messages.append({"role": "tool", "content": result})
 
+    logs.get("agent").warning("крок досяг ліміту ітерацій (%d): %s", max_iters, step_text[:80])
     return ITER_LIMIT_MSG, log

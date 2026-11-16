@@ -29,6 +29,7 @@ import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
 APP_URL_RE = re.compile(r"App running at: (http://\S+)")
 STARTUP_TIMEOUT = 60.0
 # :8000 на цій машині тримає "привид" — порт LISTENING, але PID-власник вже не
@@ -157,6 +158,9 @@ def main() -> None:
 
     if "--backend-port" not in extra:
         extra = [*extra, "--backend-port", str(DEFAULT_BACKEND_PORT)]
+    from agent import logs
+    log = logs.setup("igor-launcher")      # окремий файл: бекенд пише в igor.log
+    log.info("запуск, аргументи=%s", extra)
     proc, url_q, srv_state = _start_server(extra)
     try:
         try:
@@ -164,21 +168,28 @@ def main() -> None:
         except queue.Empty:
             url = ""
         if not url:
+            log.error("сервер не повідомив URL за %.0fс (код виходу=%s)", STARTUP_TIMEOUT, proc.poll())
             print(f"Сервер не повідомив URL за {STARTUP_TIMEOUT:.0f}с — дивіться лог вище.")
             return
+        log.info("сервер піднявся: %s", url)
         import webview
         geo = _load_geometry()
         # text_select=False — дефолт pywebview, забороняє виділення/копіювання
         # тексту в усьому вікні (живий кейс: текст у чаті неможливо було виділити).
         window = webview.create_window(
-            "local-code-agent", url, width=geo["width"], height=geo["height"],
+            "Ігорь!", url, width=geo["width"], height=geo["height"],
             x=geo.get("x"), y=geo.get("y"), min_size=(800, 600), text_select=True,
         )
         # closing — синхронна подія (блокує закриття до завершення хендлера),
         # тож геометрія читається ДО того, як вікно (і його властивості) зникне.
         window.events.closing += lambda: _save_geometry(window)
         webview.start()
+        log.info("вікно закрито користувачем")
+    except Exception:
+        log.exception("збій лаунчера")
+        raise
     finally:
+        log.info("зупиняю сервер (код виходу=%s)", proc.poll())
         _stop_server(proc)
         _stop_ollama(srv_state.get("ollama_pid"))
 

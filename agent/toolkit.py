@@ -12,7 +12,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+import time as _time
+
 from . import limits
+from . import logs
 from . import tools as T
 from .executor import apply_edit, create_from_source, run_edit
 from .project import scan_structure
@@ -59,13 +62,22 @@ class ToolRegistry:
         } for t in self._tools.values()]
 
     def dispatch(self, name: str, args: dict, ctx: ToolContext) -> str:
+        log = logs.get("tools")
         t = self._tools.get(name)
         if not t:
+            log.warning("невідомий інструмент: %s", name)
             return f"невідомий інструмент: {name}"
+        t0 = _time.monotonic()
         try:
-            return t.handler(args or {}, ctx)
+            out = t.handler(args or {}, ctx)
         except Exception as e:
+            log.error("тул %s упав за %.2fс (аргументи: %s): %s", name, _time.monotonic() - t0,
+                      ",".join((args or {}).keys()), e, exc_info=True)
             return f"помилка інструмента {name}: {e}"
+        log.info("тул %s ок %.2fс args=[%s] результат=%d симв.%s", name, _time.monotonic() - t0,
+                 ",".join((args or {}).keys()), len(out or ""),
+                 f" | {logs.clip(args)} -> {logs.clip(out)}" if logs.content_enabled() else "")
+        return out
 
 
 # ── Обробники ────────────────────────────────────────────────────────────────
