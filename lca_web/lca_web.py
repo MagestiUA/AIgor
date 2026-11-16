@@ -21,12 +21,13 @@ from agent import backend as B
 from agent import config
 from agent import convo
 from agent import context_view as cv
+from agent.loopguard import (CONTEXT_FULL_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from agent import limits
 from agent import logs
 from agent import chat_projects as CP
 from agent import session as sess
 from agent import topics
-from agent.agent_loop import (ITER_LIMIT_MSG, _estimate_iters, NUDGE_TEXT, pending_continuation,
+from agent.agent_loop import (ITER_LIMIT_MSG, is_incomplete, _estimate_iters, NUDGE_TEXT, pending_continuation,
                               recover_tool_calls, should_nudge,
                               _looks_like_leaked_reasoning,
                               extract_intended_attachments)
@@ -947,7 +948,7 @@ class State(rx.State):
             final, log = await self._run_tool_step(step.description, ctx,
                                                    title=step.description[:60],
                                                    context=step_ctx, stop_event=stop_ev)
-            plan.set_result(step.id, "done" if (log and final != ITER_LIMIT_MSG) else "failed", final or "—")
+            plan.set_result(step.id, "done" if (log and not is_incomplete(final)) else "failed", final or "—")
         async with self:
             self._append("assistant", "⛔ Зупинено" if stopped else "Готово ✓", "note")
         return render_for_planner(plan)               # outcome для фонового підсумку
@@ -992,7 +993,10 @@ class State(rx.State):
         user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
         messages = [{"role": "system", "content": EXEC_SYSTEM},
                     {"role": "user", "content": user}]
-        max_iters = await asyncio.to_thread(lambda: _estimate_iters(step_text, context, client))
+        # сервер: довгу роботу не обмежуємо (стежимо за прогресом, LoopGuard); локальна модель — оцінка
+        max_iters = limits.get().hard_iters or await asyncio.to_thread(
+            lambda: _estimate_iters(step_text, context, client))
+        guard = LoopGuard()
         actions: list[tuple[str, str]] = []   # (tool, result)
         stats: list[dict] = []                # client.last_stats кожного виклику моделі
         final = ITER_LIMIT_MSG
@@ -1031,6 +1035,23 @@ class State(rx.State):
                 result = await self._dispatch_tool(reg, name, args, ctx)
                 actions.append((name, result))
                 messages.append({"role": "tool", "content": result})
+                guard.observe(name, args, result)
+            verdict = guard.check()
+            if verdict:
+                kind, reason = verdict
+                _log.warning("зациклення (%s): %s | останній результат: %s", kind, reason,
+                             guard.last_result[:120].replace(chr(10), " "))
+                if kind == "stop":
+                    final = guard.stuck_message(reason)
+                    break
+                messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason)})
+                async with self:
+                    self._append("assistant", f"⚠ Помітив повтор без прогресу ({reason}) — прошу змінити підхід.", "note")
+            ls = getattr(client, "last_stats", None) or {}
+            if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):
+                final = (f"{CONTEXT_FULL_PREFIX} ({ls.get('prompt')} токенів). "
+                         "Розбийте задачу на менші кроки.")
+                break
         log = [f"{n} -> {r[:80]}" for n, r in actions]
 
         parts: list[str] = []

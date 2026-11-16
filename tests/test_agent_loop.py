@@ -172,6 +172,50 @@ def main() -> None:
     # ...а для слабої (LOCAL) той самий текст, як і раніше, виконується (зворотна сумісність)
     assert recover_tool_calls({"content": ex})[1] is True
 
+    # ── LoopGuard у run_step (сервер: limits.REMOTE, hard_iters=400, без оцінки кроку) ──
+    from agent.agent_loop import is_incomplete
+    from agent.loopguard import STUCK_PREFIX
+
+    class Recorder:
+        """Скриптова модель, що пам'ятає, які повідомлення бачила на кожному виклику."""
+        def __init__(self, fn):
+            self.fn, self.n, self.seen = fn, 0, []
+
+        def chat(self, messages, tools=None, profile=None, fmt=None):
+            self.seen.append([m.get("content", "") for m in messages if m.get("role") == "user"])
+            self.n += 1
+            return self.fn(self, messages)
+
+    def read_missing(path):
+        return {"tool_calls": [{"function": {"name": "read_file", "arguments": {"path": path}}}]}
+
+    limits.FORCE = limits.REMOTE
+    try:
+        # 1) модель вічно б'ється в одну стіну: підказка після 3-го, зупинка після 6-го виклику
+        loop = Recorder(lambda s, m: read_missing("нема.py"))
+        f, lg = run_step("залип", ctx, client=loop, max_iters=None)
+        assert f.startswith(STUCK_PREFIX) and len(lg) == 6 and loop.n == 6, (f, len(lg), loop.n)
+        assert any("repeating the same actions" in u for u in loop.seen[3]), "після 3-го виклику має бути підказка"
+        assert is_incomplete(f)
+
+        # 2) після підказки модель змінює підхід і завершує — зупинки немає
+        def recovering(s, m):
+            warned = any("repeating the same actions" in (x.get("content") or "") for x in m if x.get("role") == "user")
+            return {"content": "Блокер описано: файлу немає.", "tool_calls": []} if warned else read_missing("нема.py")
+        ok = Recorder(recovering)
+        f2, lg2 = run_step("залип і виправився", ctx, client=ok, max_iters=None)
+        assert f2 == "Блокер описано: файлу немає." and not is_incomplete(f2) and len(lg2) == 3
+
+        # 3) довга справна робота (60 різних дій — більше за колишній ліміт) НЕ зупиняється
+        def long_work(s, m):
+            return read_missing(f"f{s.n}.py") if s.n < 60 else {"content": "Готово, 60 кроків.", "tool_calls": []}
+        lw = Recorder(long_work)
+        f3, lg3 = run_step("довго", ctx, client=lw, max_iters=None)
+        assert f3 == "Готово, 60 кроків." and len(lg3) == 59, (f3, len(lg3))
+    finally:
+        limits.FORCE = limits.LOCAL
+    assert is_incomplete("досягнуто ліміту ітерацій") and not is_incomplete("Готово")
+
     print("OK: tool-loop виконує тули через реєстр, завершується, ліміт ітерацій тримає, nudge витягує порожні/просочені відповіді, парсинг просочених викликів виконує дію напряму, pending_continuation тримає пагінацію великих файлів, _looks_like_leaked_reasoning ловить просочений self-talk")
     print(f"  журнал кроку 1: {log}")
 

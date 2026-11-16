@@ -12,10 +12,17 @@ import re
 from . import config
 from . import limits
 from . import logs
+from .loopguard import (CONTEXT_FULL_PREFIX, STUCK_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from .llm import OllamaClient
 from .toolkit import ToolContext, ToolRegistry, default_registry
 
 ITER_LIMIT_MSG = "досягнуто ліміту ітерацій"   # крок НЕ завершено — не вважати «done»
+
+
+def is_incomplete(final: str | None) -> bool:
+    """Крок НЕ завершено (ліміт / зациклення / переповнений контекст) — не вважати «done»."""
+    f = final or ""
+    return f == ITER_LIMIT_MSG or f.startswith(STUCK_PREFIX) or f.startswith(CONTEXT_FULL_PREFIX)
 
 SYSTEM = (
     "You are an execution agent for ONE task step on a Windows machine (PowerShell). "
@@ -289,7 +296,10 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
     client = client or OllamaClient()
     registry = registry or default_registry()
     if max_iters is None:
-        max_iters = _estimate_iters(step_text, context, client)
+        # Слабка локальна модель: ліміт за оцінкою. Сильна (сервер): довгу роботу НЕ обмежуємо —
+        # стежимо за прогресом (LoopGuard), а hard_iters — лише запобіжник.
+        max_iters = limits.get().hard_iters or _estimate_iters(step_text, context, client)
+    guard = LoopGuard()
     user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
     messages = [{"role": "system", "content": SYSTEM},
                 {"role": "user", "content": user}]
@@ -335,6 +345,20 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
             if on_tool:
                 on_tool(name, args, result)
             messages.append({"role": "tool", "content": result})
+            guard.observe(name, args, result)
+        verdict = guard.check()
+        if verdict:
+            kind, reason = verdict
+            logs.get("agent").warning("зациклення (%s): %s | останній результат: %s", kind, reason,
+                                      guard.last_result[:120].replace(chr(10), " "))
+            if kind == "stop":
+                return guard.stuck_message(reason), log
+            messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason)})
+        ls = getattr(client, "last_stats", None) or {}
+        if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):
+            logs.get("agent").warning("контекст майже заповнений: %s токенів", ls.get("prompt"))
+            return (f"{CONTEXT_FULL_PREFIX} ({ls.get('prompt')} токенів). "
+                    "Розбийте задачу на менші кроки."), log
 
     logs.get("agent").warning("крок досяг ліміту ітерацій (%d): %s", max_iters, step_text[:80])
     return ITER_LIMIT_MSG, log
