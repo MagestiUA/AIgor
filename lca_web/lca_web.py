@@ -1016,7 +1016,8 @@ class State(rx.State):
         ніж нескінченний цикл)."""
         body, thinking, _ = await self._run_stream(client.chat_stream(msgs, profile=profile))
         for _ in range(max_attempts - 1):
-            if (body or "").strip() and not _looks_like_leaked_reasoning(body):
+            if (body or "").strip() and not (limits.get().weak_model_fixes
+                                             and _looks_like_leaked_reasoning(body)):
                 break
             if not (body or "").strip():
                 nudge = ("Ти не дав фінальної відповіді (лише міркував). Дай КОНКРЕТНУ "
@@ -1075,7 +1076,8 @@ class State(rx.State):
                     known = ([p.name for p in Path(tctx.attachments_dir).iterdir() if p.is_file()]
                              if tctx.attachments_dir and Path(tctx.attachments_dir).is_dir() else [])
                     intended = (extract_intended_attachments(content, known)
-                                if known and "read_attachment" in content else [])
+                                if known and limits.get().weak_model_fixes
+                                and "read_attachment" in content else [])
                     if cont is not None:
                         tool_calls, recovered = [cont], True
                     elif intended:

@@ -25,17 +25,24 @@ class Limits:
     history_msgs: int   # скільки останніх повідомлень чату йде в контекст
     max_file: int       # макс. розмір одного вкладення, байт
     file_chars: int     # скільки символів файлу зберігаємо при завантаженні
+    # Милиці під слабку модель (CRUTCHES.md A1/A2/A4/A5): виконання «просочених» викликів
+    # тулів з тексту, nudge за regex-евристиками, самовільне читання вкладень за
+    # «оголошеним наміром», повтор при self-talk. На сильній моделі вони шкодять:
+    # живий тест T5 — 11/12 звичайних текстових відповідей з прикладом JSON було б
+    # ВИКОНАНО як виклик write_file.
+    weak_model_fixes: bool
 
 
 LOCAL = Limits(chunk=32_000, inline=32_000, summary=32_000, digest=96_000, topic=96_000,
-               history_msgs=20, max_file=200 * 1024, file_chars=12_000)
+               history_msgs=20, max_file=200 * 1024, file_chars=12_000,
+               weak_model_fixes=True)
 
 # ~256k токенів: найбільший одночасний внесок (вкладення inline ≈ 80k ток. + підсумок
 # ≈ 40k при 2.5 симв./ток.) ≈ 120k, тобто < 50% вікна — решта під історію, системні
 # промпти, тули й відповідь.
 REMOTE = Limits(chunk=120_000, inline=200_000, summary=100_000, digest=200_000,
                 topic=200_000, history_msgs=40, max_file=2 * 1024 * 1024,
-                file_chars=2 * 1024 * 1024)
+                file_chars=2 * 1024 * 1024, weak_model_fixes=False)
 
 FORCE: Limits | None = None
 

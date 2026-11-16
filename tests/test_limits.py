@@ -11,6 +11,7 @@ def main() -> None:
     assert r.history_msgs > l.history_msgs and r.file_chars > l.file_chars
     # запас: вкладення inline + підсумок (у токенах ≈ симв./2.5) помітно менші за 256k
     assert (r.inline + r.summary) / 2.5 < 0.5 * 262_144, 'inline+summary має лишати >50% вікна'
+    assert l.weak_model_fixes and not r.weak_model_fixes
     limits.FORCE = l
     try:
         assert limits.get({"llm_backend": "openai"}) is l       # FORCE перекриває

@@ -153,6 +153,25 @@ def main() -> None:
     assert not _looks_like_leaked_reasoning("Зрозумів, ось готова відповідь українською.")
     assert not _looks_like_leaked_reasoning("Wait — це звичайне слово в коді, не просочення.")
 
+    # Сильна модель (limits.REMOTE, weak_model_fixes=False): текст лишається текстом.
+    # Живий кейс T5: відповідь із прикладом JSON {"name": "write_file", ...} НЕ має
+    # виконуватись як виклик і НЕ має провокувати nudge; порожня відповідь — nudge лишається.
+    from agent.agent_loop import recover_tool_calls, should_nudge
+    limits.FORCE = limits.REMOTE
+    try:
+        ex = 'Ось приклад: {"name": "write_file", "arguments": {"path": "demo.txt", "content": "x"}}'
+        assert recover_tool_calls({"content": ex}) == ([], False)
+        assert not should_nudge(ex, False)
+        assert not should_nudge("I will call read_attachment for all files", False)
+        assert should_nudge("", False) and not should_nudge("", True)
+        strong = LoopStub([{"content": ex, "tool_calls": []}])
+        final9, log9 = run_step("покажи приклад JSON", ctx, client=strong, max_iters=3)
+        assert not (root / "demo.txt").exists() and not log9 and "приклад" in final9
+    finally:
+        limits.FORCE = limits.LOCAL
+    # ...а для слабої (LOCAL) той самий текст, як і раніше, виконується (зворотна сумісність)
+    assert recover_tool_calls({"content": ex})[1] is True
+
     print("OK: tool-loop виконує тули через реєстр, завершується, ліміт ітерацій тримає, nudge витягує порожні/просочені відповіді, парсинг просочених викликів виконує дію напряму, pending_continuation тримає пагінацію великих файлів, _looks_like_leaked_reasoning ловить просочений self-talk")
     print(f"  журнал кроку 1: {log}")
 

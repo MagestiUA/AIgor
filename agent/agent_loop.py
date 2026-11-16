@@ -10,6 +10,7 @@ import json
 import re
 
 from . import config
+from . import limits
 from .llm import OllamaClient
 from .toolkit import ToolContext, ToolRegistry, default_registry
 
@@ -177,6 +178,8 @@ def recover_tool_calls(msg: dict) -> tuple[list[dict], bool]:
     calls = msg.get("tool_calls") or []
     if calls:
         return calls, False
+    if not limits.get().weak_model_fixes:
+        return [], False   # сильна модель: текст лишається текстом (див. CRUTCHES.md A1)
     leaked = _extract_leaked_tool_call((msg.get("content") or "").strip())
     return ([leaked], True) if leaked else ([], False)
 
@@ -199,9 +202,12 @@ def should_nudge(content: str, already_nudged: bool) -> bool:
     просочилась як текст замість structured tool_calls — плутанина тегів
     <tool_call>/<tools>, бачено на qwen3-coder) і ще НЕ нюджили цього разу (рівно
     один nudge — щоб не зациклитись, якщо модель стабільно ламає формат)."""
-    return not already_nudged and (
-        not content or _looks_like_leaked_tool_call(content) or _announces_tool_intent(content)
-    )
+    if already_nudged:
+        return False
+    if not content:
+        return True
+    return limits.get().weak_model_fixes and (
+        _looks_like_leaked_tool_call(content) or _announces_tool_intent(content))
 
 
 # Живий кейс: gemma4 (think=on) інколи НЕ розділяє content/thinking сама — Ollama
