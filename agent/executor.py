@@ -36,10 +36,18 @@ class EditResult:
 def _extract_code(text: str) -> str:
     """Дістати код: перший ```-блок, якщо є; інакше весь текст."""
     t = (text or "").strip()
-    m = re.search(r"```(?:python)?\s*\n(.*?)```", t, re.DOTALL)
+    m = re.search(r"```[\w+.-]*\s*\n(.*?)```", t, re.DOTALL)
     if m:
         return m.group(1).rstrip("\n")
     return t
+
+
+def _is_python(path: str | Path) -> bool:
+    return str(path).lower().endswith((".py", ".pyw"))
+
+
+def _fence_lang(path: str | Path) -> str:
+    return "python" if _is_python(path) else (Path(str(path)).suffix.lstrip(".").lower() or "text")
 
 
 def run_edit(path: str | Path, instruction: str,
@@ -48,25 +56,28 @@ def run_edit(path: str | Path, instruction: str,
     client = client or OllamaClient()
     original = tools.read_file(path)
 
-    stripped, mapping = strip_code(original)
+    py = _is_python(path)                       # strip літералів і ast-перевірка — лише для .py
+    stripped, mapping = strip_code(original) if py else (original, {})
     preamble = f"Project context:\n{project_doc}\n\n" if project_doc else ""
     messages = [
         {"role": "system", "content": SYSTEM},
         {"role": "user",
          "content": f"{preamble}Instruction:\n{instruction}\n\n"
-                    f"File `{path}`:\n```python\n{stripped}\n```"},
+                    f"File `{path}`:\n```{_fence_lang(path)}\n{stripped}\n```"},
     ]
     msg = client.chat(messages, profile=config.EXECUTOR)
     new_stripped = _extract_code(msg.get("content") or "")
 
-    ok, err = tools.validate_python(new_stripped)
-    if not ok:
-        return EditResult(False, None, "", f"вивід LLM невалідний: {err}", None)
+    if py:
+        ok, err = tools.validate_python(new_stripped)
+        if not ok:
+            return EditResult(False, None, "", f"вивід LLM невалідний: {err}", None)
 
     final = restore_code(new_stripped, mapping)
-    ok2, err2 = tools.validate_python(final)
-    if not ok2:
-        return EditResult(False, None, "", f"після restore невалідно: {err2}", None)
+    if py:
+        ok2, err2 = tools.validate_python(final)
+        if not ok2:
+            return EditResult(False, None, "", f"після restore невалідно: {err2}", None)
 
     final, _note = tools.match_style(original, final, str(Path(path).name))
     diff = tools.unified_diff(original, final, str(Path(path).name))
@@ -86,26 +97,29 @@ def create_from_source(target: str | Path, source_path: str | Path, instruction:
     переносяться verbatim через strip/restore (модель їх не бачить)."""
     client = client or OllamaClient()
     original = tools.read_file(source_path)
-    stripped, mapping = strip_code(original)
+    py = _is_python(source_path) and _is_python(target)
+    stripped, mapping = strip_code(original) if py else (original, {})
     preamble = f"Project context:\n{project_doc}\n\n" if project_doc else ""
     messages = [
         {"role": "system", "content": SYSTEM},
         {"role": "user",
          "content": f"{preamble}Instruction:\n{instruction}\n\n"
                     f"Base the NEW file on this source `{Path(source_path).name}`:\n"
-                    f"```python\n{stripped}\n```\nReturn the COMPLETE new file."},
+                    f"```{_fence_lang(source_path)}\n{stripped}\n```\nReturn the COMPLETE new file."},
     ]
     msg = client.chat(messages, profile=config.EXECUTOR)
     new_stripped = _extract_code(msg.get("content") or "")
 
-    ok, err = tools.validate_python(new_stripped)
-    if not ok:
-        return EditResult(False, None, "", f"вивід LLM невалідний: {err}", None)
+    if py:
+        ok, err = tools.validate_python(new_stripped)
+        if not ok:
+            return EditResult(False, None, "", f"вивід LLM невалідний: {err}", None)
 
     final = restore_code(new_stripped, mapping)
-    ok2, err2 = tools.validate_python(final)
-    if not ok2:
-        return EditResult(False, None, "", f"після restore невалідно: {err2}", None)
+    if py:
+        ok2, err2 = tools.validate_python(final)
+        if not ok2:
+            return EditResult(False, None, "", f"після restore невалідно: {err2}", None)
 
     diff = tools.unified_diff("", final, str(Path(target).name))
     return EditResult(True, final, diff, "", None)
