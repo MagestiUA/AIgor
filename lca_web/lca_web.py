@@ -39,7 +39,7 @@ from agent.answerer import build_context
 from agent.hierarchical import check_consistency
 from agent.intent import classify_intent
 from agent.llm import OllamaClient
-from agent.memory import render_for_planner
+from agent.memory import render_for_planner, render_for_user
 from agent.planner import deliberate
 from agent.project import load_project_doc, scan_structure
 from agent.project_info import git_info
@@ -1010,7 +1010,7 @@ class State(rx.State):
                 break
             async with self:
                 self.status = f"Крок #{step.id}/{total}: {step.description[:50]}"
-            if step.kind == "inline":
+            if step.is_noop:
                 plan.set_result(step.id, "done", "inline")
                 continue
             final, log = await self._run_tool_step(step.description, ctx,
@@ -2032,11 +2032,11 @@ class State(rx.State):
             return task, ""
         big = orch.is_big_plan(state)                 # ≥4 кроків — показуємо на схвалення НАВІТЬ без «план наперед»
         if plan_first or big:
-            n_act = sum(1 for s in state.steps if s.kind != "inline")
+            n_act = sum(1 for s in state.steps if not s.is_noop)
             head = (f"⚠ **Великий план: {n_act} кроків.** Перегляньте й підтвердьте (кнопка «Виконати»), "
                     "перш ніж я почну.\n\n") if big else ""
             async with self:
-                self._append("assistant", head + render_for_planner(state), "plan")
+                self._append("assistant", head + render_for_user(state), "plan")
                 s = sess.load_session(self.current_id)
                 s.set_pending_plan(state)
                 sess.save_session(s)

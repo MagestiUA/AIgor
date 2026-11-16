@@ -78,7 +78,7 @@ BIG_PLAN_STEPS = 4
 
 def is_big_plan(state, threshold: int = BIG_PLAN_STEPS) -> bool:
     """План, що потребує обов'язкового схвалення: ≥threshold кроків, які щось виконують."""
-    return sum(1 for s in state.steps if s.kind != "inline") >= threshold
+    return sum(1 for s in state.steps if not s.is_noop) >= threshold
 
 
 # ── C: що змінили кроки і чи це живе ────────────────────────────────────────

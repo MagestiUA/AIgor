@@ -79,7 +79,7 @@ def check_consistency(state: TaskState, client: OllamaClient) -> dict:
 def _run_one(step, state: TaskState, ctx: ToolContext, client, registry,
              extra: str = "") -> None:
     """Виконати один крок із ВУЗЬКИМ контекстом (зріз стану) і записати результат."""
-    if step.kind == "inline":
+    if step.is_noop:
         state.set_result(step.id, "done", "inline")
         return
     narrow = render_for_planner(state)                        # робоча памʼять — лише зріз

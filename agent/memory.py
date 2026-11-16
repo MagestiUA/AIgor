@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -22,6 +23,13 @@ class Step:
     target: str | None = None
     status: str = "pending"   # pending | done | failed
     result: str = ""          # СТИСЛИЙ результат (один рядок), не сирий вивід
+
+    @property
+    def is_noop(self) -> bool:
+        """`inline` без файлу-цілі — справді тривіальний крок, нічого виконувати. Якщо ж у inline-кроку
+        є target, планувальник помилково назвав правку файлу «тривіальною» — виконуємо як `llm`
+        (інакше крок мовчки помічався б виконаним, а файл лишався незмінним)."""
+        return self.kind == "inline" and not (self.target or "").strip()
 
 
 @dataclass
@@ -87,3 +95,26 @@ def render_for_planner(state: TaskState) -> str:
         for k, v in state.facts.items():
             lines.append(f"  - {k}: {v}")
     return "\n".join(lines)
+
+
+_SUBSTEP = re.compile(r"\s(?=\d{1,2}\)\s)")
+_NUM = re.compile(r"^\d{1,2}\)\s*")
+
+
+def render_for_user(state: TaskState) -> str:
+    """План для показу в чаті (markdown): окремі пункти, вкладені «1) … 2) …» — підпункти.
+    Одноразові переноси рядків markdown склеює, тому кожен пункт — власний рядок списку."""
+    icon = {"done": "✅", "failed": "❌", "pending": "⬜"}
+    out = [f"**Задача:** {state.task}", "", "**План:**", ""]
+    for s in state.steps:
+        tgt = f" · `{s.target}`" if s.target else ""
+        head, *subs = _SUBSTEP.split(s.description.strip())
+        out.append(f"{icon.get(s.status, '⬜')} **#{s.id}** `{s.kind}`{tgt} — {head.strip()}")
+        for sub in subs:
+            out.append("    - " + _NUM.sub("", sub.strip()))
+        if s.result:
+            out.append(f"    - ↳ {s.result}")
+        out.append("")
+    if state.facts:
+        out += ["**Факти/артефакти:**", ""] + [f"- {k}: {v}" for k, v in state.facts.items()]
+    return "\n".join(out).rstrip()

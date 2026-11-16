@@ -42,6 +42,14 @@ def main() -> None:
     st.add_step("deterministic", "тести")
     assert o.is_big_plan(st) and not o.is_big_plan(st, threshold=5)
 
+    # inline З файлом-ціллю — це правка, а не нотатка: виконується (регресія: «план без жодного запису»)
+    s_note = st.steps[3]
+    assert s_note.is_noop
+    st.add_step("inline", "додати EXPOSE 8080", "Dockerfile")
+    s_edit = st.steps[-1]
+    assert s_edit.target == "Dockerfile" and not s_edit.is_noop
+    assert o.is_big_plan(st, threshold=5)
+
     # C: що змінив крок, перевірка синтаксису, вибір кроку для повтору
     assert o.touched_paths("write_file", {"path": "a.py"}) == ["a.py"]
     assert o.touched_paths("edit_file", {"path": "b.py", "instruction": "x"}) == ["b.py"]

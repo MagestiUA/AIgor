@@ -3,7 +3,7 @@
 """
 import tempfile
 
-from agent.memory import TaskState, load, render_for_planner, save
+from agent.memory import TaskState, load, render_for_planner, render_for_user, save
 
 
 def main() -> None:
@@ -29,6 +29,15 @@ def main() -> None:
     assert "Задача:" in rendered
     assert "#1" in rendered and "#2" in rendered
     assert "BODY_1" in rendered
+
+    # показ користувачу: кожен крок — окремий рядок списку, «1) … 2) …» — підпункти
+    ui = render_for_user(st2)
+    lines = ui.splitlines()
+    assert any(l.startswith("✅ **#1**") for l in lines) and any(l.startswith("⬜ **#2**") for l in lines), ui
+    st2.steps[1].description = "Зробити: 1) перше 2) друге 3) третє"
+    ui = render_for_user(st2)
+    assert "    - перше" in ui and "    - друге" in ui and "    - третє" in ui, ui
+    assert "\n\n" in ui                                  # порожні рядки між пунктами — інакше markdown склеїть
 
     print("OK: стан задачі зберігається/завантажується, рендер компактний\n")
     print(rendered)
