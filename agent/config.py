@@ -22,12 +22,36 @@ MODEL = "gemma4:26b-a4b-it-qat"   # дефолт OllamaClient; профілі н
 
 REQUEST_TIMEOUT = 600
 
+def load_dotenv(path=None) -> None:
+    """Мінімальний .env-лоадер (без залежності): KEY=VALUE, '#'-коментарі, опційні
+    лапки/`export`. Справжні змінні середовища мають пріоритет (setdefault) — .env
+    лише доповнює. Файл — у корені репо (поруч з main.py), у git не потрапляє."""
+    from pathlib import Path
+    p = Path(path) if path else Path(__file__).resolve().parent.parent / ".env"
+    try:
+        lines = p.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for ln in lines:
+        ln = ln.strip()
+        if not ln or ln.startswith("#") or "=" not in ln:
+            continue
+        k, _, v = ln.partition("=")
+        k = k.strip().removeprefix("export ").strip()
+        v = v.strip()
+        if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":
+            v = v[1:-1]
+        if k:
+            _os.environ.setdefault(k, v)
+
+
 # Бекенд LLM: "ollama" (локально, дефолт) | "openai" (орендований vLLM на H100,
 # OpenAI-сумісний API; клієнт — llm_openai.OpenAIClient). Перемикання: env LCA_BACKEND.
 # При "openai" профілі нижче лишаються (think/temperature працюють), а їхні
 # ollama-специфічні поля (model, num_ctx, DRY) ігноруються — модель одна: REMOTE_MODEL.
 # Ключ — з env LLM_API_KEY (у код/репо НЕ кладемо).
 import os as _os
+load_dotenv()       # .env може містити й LCA_BACKEND, і LLM_API_KEY — читаємо ДО них
 BACKEND = _os.environ.get("LCA_BACKEND", "ollama").lower()
 REMOTE_BASE_URL = _os.environ.get("LCA_REMOTE_URL", "http://llm.example.com:8000/v1")
 REMOTE_MODEL = _os.environ.get("LCA_REMOTE_MODEL", "Qwen3.8-27B-Uncensored")
