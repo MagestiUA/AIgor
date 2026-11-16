@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import ast
 import difflib
+import os
 import shlex
 import shutil
 import subprocess
@@ -25,12 +26,20 @@ def write_file(path: str | Path, content: str) -> None:
     Path(path).write_text(content, encoding="utf-8")
 
 
+BACKUP_ROOT = Path.home() / ".local-code-agent" / "backups"
+
+
 def backup_file(path: str | Path) -> str | None:
     """Знімок перед записом. Повертає шлях бекапу або None, якщо файлу нема."""
     p = Path(path)
     if not p.exists():
         return None
-    bak = p.with_suffix(p.suffix + f".bak.{int(time.time())}")
+    # Бекапи — НЕ поруч із файлом: живий кейс (Cerberus3) — за один прогін у корені
+    # проєкту накопичилось десятки *.bak.<час>. Тепер у теці користувача, за хешем теки.
+    import hashlib
+    d = BACKUP_ROOT / hashlib.sha1(str(p.resolve().parent).encode("utf-8")).hexdigest()[:8]
+    d.mkdir(parents=True, exist_ok=True)
+    bak = d / f"{p.name}.bak.{time.time_ns()}"
     shutil.copy2(p, bak)
     return str(bak)
 
@@ -97,8 +106,11 @@ def run_shell(command: str, cwd: str | None = None, timeout: int | None = None,
         # розпакувались (бекслеші всередині лишаються).
         args = [a[1:-1] if len(a) >= 2 and a[0] == a[-1] and a[0] in "\"'" else a
                 for a in shlex.split(command, posix=False)]
-        p = subprocess.run(args, cwd=cwd, capture_output=True, text=True,
-                           timeout=timeout, shell=False)
+        # Вивід дочірнього процесу читаємо як UTF-8 (а не в локальній кодовій сторінці —
+        # на Windows cp1251 давала «РЅР° РїРѕСЂС‚Сѓ» замість кирилиці) і просимо Python-діти писати UTF-8.
+        env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+        p = subprocess.run(args, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+                           errors="replace", env=env, timeout=timeout, shell=False)
         return ShellResult(True, p.returncode, p.stdout, p.stderr)
     except subprocess.TimeoutExpired:
         return ShellResult(True, -1, "", f"timeout {timeout}s")

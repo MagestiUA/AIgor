@@ -17,7 +17,7 @@ from __future__ import annotations
 import json
 
 from . import config
-from .agent_loop import run_step
+from .agent_loop import ITER_LIMIT_MSG, run_step
 from .llm import OllamaClient
 from .memory import TaskState, render_for_planner
 from .planner import make_plan
@@ -83,7 +83,7 @@ def _run_one(step, state: TaskState, ctx: ToolContext, client, registry,
     narrow = render_for_planner(state)                        # робоча памʼять — лише зріз
     desc = step.description + (f"\nУточнення: {extra}" if extra else "")
     final, log = run_step(desc, ctx, client, registry, context=narrow)
-    state.set_result(step.id, "done" if log or final else "failed", (final or "")[:200])
+    state.set_result(step.id, "done" if ((log or final) and final != ITER_LIMIT_MSG) else "failed", (final or "")[:200])
 
 
 def solve(task: str, ctx: ToolContext, client: OllamaClient | None = None,

@@ -91,12 +91,23 @@ def h_read_file(args, ctx):
     if not p.is_file():
         return f"файл не знайдено: {args.get('path')}"
     text = T.read_file(p)
-    if len(text) > 8000:
-        return (text[:8000] +
-                f"\n\n…[обрізано: показано 8000 з {len(text)} символів]. НЕ копіюй вміст "
-                "вручну — для дублювання у новий файл клич create_from_source, для зміни на "
-                "місці — edit_file (вони зберігають великі дані-літерали байт-у-байт).")
-    return text
+    cap = limits.get().read_chars
+    try:
+        offset = max(0, int(args.get("offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    if len(text) <= cap and offset == 0:
+        return text
+    chunk = text[offset:offset + cap]
+    end = offset + len(chunk)
+    if end >= len(text):
+        return f"[символи {offset}-{end} з {len(text)}, кінець файлу]\n{chunk}"
+    # Живий кейс (Cerberus3): без offset модель не могла дочитати файл у 43k символів і
+    # витрачала увесь ліміт ітерацій на `python -c "print(s[a:b])"` через run_shell.
+    return (f"[символи {offset}-{end} з {len(text)}]\n{chunk}\n\n…[файл триває. Щоб "
+            f"продовжити — read_file(path, offset={end}). НЕ копіюй вміст вручну — для "
+            "дублювання у новий файл клич create_from_source, для зміни на місці — edit_file "
+            "(вони зберігають великі дані-літерали байт-у-байт).]")
 
 
 # Розмір шматка на один read_attachment-виклик. На num_ctx=131072 з резервом
@@ -245,8 +256,11 @@ def default_registry() -> ToolRegistry:
     r.register(Tool("list_dir", "Показати структуру файлів проєкту.",
                     {"path": {"type": "string", "description": "тека, типово корінь"}},
                     [], h_list_dir))
-    r.register(Tool("read_file", "Прочитати вміст файлу.",
-                    {"path": {"type": "string"}}, ["path"], h_read_file))
+    r.register(Tool("read_file", "Прочитати вміст файлу (великі — частинами через offset).",
+                    {"path": {"type": "string"},
+                     "offset": {"type": "integer",
+                                "description": "позиція в символах, з якої читати (за замовчуванням 0)"}},
+                    ["path"], h_read_file))
     r.register(Tool("read_attachment",
                     "Прочитати файл, ПРИКРІПЛЕНИЙ користувачем до повідомлення. Передай "
                     "ім'я файлу зі списку прикріплених (можна частину імені — пошук "

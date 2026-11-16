@@ -49,7 +49,26 @@ def main() -> None:
     # read_file великого файлу обрізає й підказує create_from_source
     (root / "big.py").write_text("# c\n" * 5000, encoding="utf-8")
     big = reg.dispatch("read_file", {"path": "big.py"}, ctx)
-    assert "обрізано" in big and "create_from_source" in big
+    assert "offset=" in big and "create_from_source" in big and "з 20000]" in big
+    # ...і дочитується частинами через offset до кінця (живий кейс Cerberus3: без offset
+    # модель не могла прочитати файл > 8000 символів і вигорала на run_shell)
+    from agent import limits
+    cap = limits.get().read_chars
+    got, off = "", 0
+    while off < 20000:
+        part = reg.dispatch("read_file", {"path": "big.py", "offset": off}, ctx)
+        body = part.split("]\n", 1)[1] if part.startswith("[символи") else part
+        body = body.split("\n\n…[файл триває")[0]
+        got += body
+        off += cap
+    assert got == "# c\n" * 5000, len(got)
+    # REMOTE-ліміт: файл ~43k символів віддається цілком за один виклик
+    limits.FORCE = limits.REMOTE
+    try:
+        (root / "mid.py").write_text("x = 1\n" * 7000, encoding="utf-8")
+        assert reg.dispatch("read_file", {"path": "mid.py"}, ctx) == "x = 1\n" * 7000
+    finally:
+        limits.FORCE = limits.LOCAL
 
     # read_attachment: пагінація через offset для великих файлів
     att_dir = root / ".att"

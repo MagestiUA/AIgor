@@ -21,7 +21,7 @@ from agent import limits
 from agent import chat_projects as CP
 from agent import session as sess
 from agent import topics
-from agent.agent_loop import (_estimate_iters, NUDGE_TEXT, pending_continuation,
+from agent.agent_loop import (ITER_LIMIT_MSG, _estimate_iters, NUDGE_TEXT, pending_continuation,
                               recover_tool_calls, should_nudge,
                               _looks_like_leaked_reasoning,
                               extract_intended_attachments)
@@ -775,7 +775,7 @@ class State(rx.State):
             final, log = await self._run_tool_step(step.description, ctx,
                                                    title=step.description[:60],
                                                    context=step_ctx, stop_event=stop_ev)
-            plan.set_result(step.id, "done" if log else "failed", final or "—")
+            plan.set_result(step.id, "done" if (log and final != ITER_LIMIT_MSG) else "failed", final or "—")
         async with self:
             self._append("assistant", "⛔ Зупинено" if stopped else "Готово ✓", "note")
         return render_for_planner(plan)               # outcome для фонового підсумку
@@ -823,7 +823,7 @@ class State(rx.State):
         max_iters = await asyncio.to_thread(lambda: _estimate_iters(step_text, context, client))
         actions: list[tuple[str, str]] = []   # (tool, result)
         stats: list[dict] = []                # client.last_stats кожного виклику моделі
-        final = "досягнуто ліміту ітерацій"
+        final = ITER_LIMIT_MSG
         nudged = False
         for _ in range(max_iters):
             if stop_event is not None and stop_event.is_set():

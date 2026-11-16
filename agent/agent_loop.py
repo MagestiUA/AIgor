@@ -14,6 +14,8 @@ from . import limits
 from .llm import OllamaClient
 from .toolkit import ToolContext, ToolRegistry, default_registry
 
+ITER_LIMIT_MSG = "досягнуто ліміту ітерацій"   # крок НЕ завершено — не вважати «done»
+
 SYSTEM = (
     "You are an execution agent for ONE task step on a Windows machine (PowerShell). "
     "Working directory (project root) is provided in context — all relative paths are "
@@ -328,4 +330,4 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
                 on_tool(name, args, result)
             messages.append({"role": "tool", "content": result})
 
-    return "досягнуто ліміту ітерацій", log
+    return ITER_LIMIT_MSG, log
