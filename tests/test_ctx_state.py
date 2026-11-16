@@ -30,7 +30,8 @@ def main() -> None:
         assert rows["Повідомлення"]["note"] == "у вікні 2 з 2"
         assert s.ctx_total.startswith("≈") and "/" in s.ctx_total and isinstance(s.ctx_pct, int)
         # секції «Середовище» / «Теки та файли» (чат без проєкту й вкладень: теки порожні)
-        assert {r["label"] for r in s.env_rows} >= {"Бекенд", "Модель", "Режим"} or \n               {r["label"] for r in s.env_rows} >= {"Сервер", "Модель", "Режим"}
+        labels = {r["label"] for r in s.env_rows}
+        assert labels >= {"Бекенд", "Модель", "Режим"} or labels >= {"Сервер", "Модель", "Режим"}, labels
         assert s.folder_rows == []
         assert all(set(r) == {"label", "tokens_label", "pct_label", "color", "note", "compress"} for r in s.ctx_rows)
         assert s.ctx_segments and all(x["width"].endswith("%") for x in s.ctx_segments)
