@@ -24,6 +24,10 @@ class Stub:
         return {"content": c}
 
 
+from agent import limits
+limits.FORCE = limits.LOCAL   # не залежати від налаштувань користувача
+
+
 def main() -> None:
     real_root = topics.TOPICS_ROOT
     topics.TOPICS_ROOT = Path(tempfile.mkdtemp()) / ".chat_topics"

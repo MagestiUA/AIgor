@@ -24,6 +24,7 @@ import re
 from pathlib import Path
 
 from . import config
+from . import limits
 from .convo import _is_empty_echo, _strip_echoed_label
 from .llm import OllamaClient
 
@@ -108,11 +109,12 @@ _MERGE_SYSTEM = (
 
 def update_topic_note(prev: str, user_text: str, outcome: str,
                       client: OllamaClient | None = None,
-                      budget: int = TOPIC_BUDGET_CHARS, profile: dict = config.EXECUTOR) -> str:
+                      budget: int | None = None, profile: dict = config.EXECUTOR) -> str:
     """Злити новий хід розмови в нотатку теми. Якщо вийшли за бюджет — ще один
     прохід тим самим промптом над самою нотаткою (природно стискає, бо
     зливає-і-стискає за дизайном). profile: chat-режим передає CHAT_EXECUTOR (gemma)."""
     client = client or OllamaClient()
+    budget = budget or limits.get().topic
     user = f"Поточна нотатка:\n{prev or '(порожньо)'}\n\nНовий хід:\nКористувач: {user_text}\n\nОбговорено: {outcome}"
     msg = client.chat(
         [{"role": "system", "content": _MERGE_SYSTEM}, {"role": "user", "content": user}],

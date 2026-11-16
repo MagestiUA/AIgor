@@ -20,6 +20,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from . import limits
+
 MAX_FILE_SIZE = 200 * 1024      # 200 KB — ліміт розміру одного файлу
 MAX_FILES = 20                  # максимальна кількість вкладень
 CHAR_BUDGET = 12_000            # символів на один файл (обрізання при збереженні)
@@ -62,17 +64,18 @@ def process(filename: str, data: bytes) -> dict:
     при помилці (`error` != "") поля `_content` немає.
     """
     size = len(data)
-    if size > MAX_FILE_SIZE:
+    lim = limits.get()
+    if size > lim.max_file:
         kb = size // 1024
         return {"name": filename, "size": size, "truncated": False,
-                "error": f"завеликий ({kb} KB > {MAX_FILE_SIZE // 1024} KB)"}
+                "error": f"завеликий ({kb} KB > {lim.max_file // 1024} KB)"}
     if classify(filename, data) == "binary":
         return {"name": filename, "size": size, "truncated": False,
                 "error": "бінарний файл (підтримуються лише текстові)"}
     content = data.decode("utf-8", errors="replace")
-    truncated = len(content) > CHAR_BUDGET
+    truncated = len(content) > lim.file_chars
     return {"name": filename, "size": size, "truncated": truncated,
-            "error": "", "_content": content[:CHAR_BUDGET]}
+            "error": "", "_content": content[:lim.file_chars]}
 
 
 def _safe_name(name: str) -> str:

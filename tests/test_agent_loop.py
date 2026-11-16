@@ -21,6 +21,10 @@ class LoopStub:
         return m
 
 
+from agent import limits
+limits.FORCE = limits.LOCAL   # не залежати від налаштувань користувача
+
+
 def main() -> None:
     root = Path(tempfile.mkdtemp())
     ctx = ToolContext(root=root, permissions={"edits": "auto", "shell": "allowlist"})

@@ -13,6 +13,10 @@ SID = "_test_session_xyz"
 SID2 = "_test_session_xyz2"
 
 
+from agent import limits
+limits.FORCE = limits.LOCAL   # не залежати від налаштувань користувача
+
+
 def main():
     # classify
     assert classify("main.py", b"print('hello')") == "text"

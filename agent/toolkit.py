@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from . import limits
 from . import tools as T
 from .executor import apply_edit, create_from_source, run_edit
 from .project import scan_structure
@@ -130,14 +131,15 @@ def h_read_attachment(args, ctx):
         names = ", ".join(p.name for p in files)
         return f"файл '{q}' не знайдено серед вкладень. Доступні: {names}"
     text = T.read_file(match)
+    chunk_size = limits.get().chunk
     try:
         offset = max(0, int(args.get("offset") or 0))
     except (TypeError, ValueError):
         offset = 0
     total = len(text)
-    chunk = text[offset:offset + ATTACHMENT_CHUNK_SIZE]
+    chunk = text[offset:offset + chunk_size]
     end = offset + len(chunk)
-    header = f"=== {match.name} ({offset}-{end} з {total}) ===" if total > ATTACHMENT_CHUNK_SIZE else f"=== {match.name} ==="
+    header = f"=== {match.name} ({offset}-{end} з {total}) ===" if total > chunk_size else f"=== {match.name} ==="
     if end < total:
         chunk += (f"\n\n…[лишилось {total - end} символів. Щоб продовжити, виклич "
                   f"read_attachment(name='{match.name}', offset={end})]")

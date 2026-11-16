@@ -17,6 +17,7 @@ from reflex_base.style import set_color_mode
 from agent import attachments as A
 from agent import config
 from agent import convo
+from agent import limits
 from agent import chat_projects as CP
 from agent import session as sess
 from agent import topics
@@ -1151,7 +1152,8 @@ class State(rx.State):
         size_floor = 6
         if cid:
             sizes = {n["name"]: n["size"] for n in A.list_saved(cid)}
-            total_chunks = sum(-(-sizes.get(n, 0) // ATTACHMENT_CHUNK_SIZE) for n in names)
+            chunk = limits.get().chunk
+            total_chunks = sum(-(-sizes.get(n, 0) // chunk) for n in names)
             if total_chunks:
                 size_floor = total_chunks + 4   # +4 запас на нюджі/нечитальні раунди
         model_estimate = await asyncio.to_thread(
@@ -1185,7 +1187,7 @@ class State(rx.State):
         Повертає (новий_текст, чи_лишились_файли_що_потребують_тула)."""
         cur = [n for n in (cur_names or []) if n]
         others = [n for n in (other_names or []) if n]
-        if cur and A.total_size(cid, cur) <= A.INLINE_BUDGET:
+        if cur and A.total_size(cid, cur) <= limits.get().inline:
             inlined = A.read_combined(cid, cur)
             content = content + "\n\n[Вкладені файли цього повідомлення — вміст нижче]\n" + inlined
             cur = []
@@ -1203,7 +1205,7 @@ class State(rx.State):
             history = [{"role": m["role"], "content": m["content"]}
                        for m in self.messages
                        if m["role"] in ("user", "assistant")
-                       and m.get("kind", "text") in ("text", "answer") and m["content"]][-20:]
+                       and m.get("kind", "text") in ("text", "answer") and m["content"]][-limits.get().history_msgs:]
         proj = CP.load_project(proj_id) if proj_id else None
         project_block = CP.as_system_block(proj.prompt) if proj else ""
         all_names = [n["name"] for n in A.list_saved(cid)]
@@ -1325,7 +1327,7 @@ class State(rx.State):
             cur_topics = list(self.session_topics)
         # chat: загальний підсумок розмови менше потрібен у деталях (деталі живуть у
         # темах нижче) — зменшуємо бюджет умовно втричі, як домовлено з користувачем.
-        budget = convo.BUDGET_CHARS // 3 if chat else convo.BUDGET_CHARS
+        budget = limits.get().summary // 3 if chat else limits.get().summary
         new = await asyncio.to_thread(
             lambda: convo.update_summary(cur, user_text, outcome, client, budget=budget, kind=kind))
         new_topics = cur_topics
@@ -1413,7 +1415,7 @@ class State(rx.State):
             # падає). Той самий ліміт, що й для файлів — понад нього зберігаємо як
             # вкладення на диск; модель читає частинами через read_attachment, а не
             # отримує суцільний блок у контексті.
-            if len(text) > A.MAX_FILE_SIZE:
+            if len(text) > limits.get().max_file:
                 kb = len(text) // 1024
                 paste_name = f"paste_{int(time.time())}.txt"
                 A.save(self.current_id, paste_name, text)

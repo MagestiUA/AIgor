@@ -7,6 +7,10 @@ from pathlib import Path
 from agent.toolkit import ToolContext, default_registry
 
 
+from agent import limits
+limits.FORCE = limits.LOCAL   # не залежати від налаштувань користувача
+
+
 def main() -> None:
     root = Path(tempfile.mkdtemp())
     (root / "a.py").write_text("X = 1\n", encoding="utf-8")

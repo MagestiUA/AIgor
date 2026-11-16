@@ -16,6 +16,10 @@ class Stub:
         return {"content": c}
 
 
+from agent import limits
+limits.FORCE = limits.LOCAL   # не залежати від налаштувань користувача
+
+
 def main() -> None:
     # перший епізод -> підсумок з пункту
     s = convo.update_summary("", "додай функцію", "створено f() у a.py",

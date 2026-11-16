@@ -22,6 +22,7 @@ from __future__ import annotations
 import re
 
 from . import config
+from . import limits
 from .llm import OllamaClient
 
 BUDGET_CHARS = 32000          # ~10k токенів
@@ -114,9 +115,11 @@ def compress_summary(summary: str, client: OllamaClient | None = None, kind: str
 
 
 def update_summary(summary: str, user_text: str, outcome: str,
-                   client: OllamaClient | None = None, budget: int = BUDGET_CHARS,
+                   client: OllamaClient | None = None, budget: int | None = None,
                    kind: str = "code") -> str:
-    """Дописати епізод поточного запиту; стиснути, якщо вийшли за бюджет."""
+    """Дописати епізод поточного запиту; стиснути, якщо вийшли за бюджет
+    (budget None -> limits.get().summary, залежить від бекенда)."""
+    budget = budget or limits.get().summary
     ep = summarize_turn(user_text, outcome, client, kind=kind)
     if not ep:
         return summary
@@ -170,13 +173,14 @@ def _is_empty_echo(text: str) -> bool:
 
 
 def update_digest(digest: str, chunk: str, client: OllamaClient | None = None,
-                  budget: int = DIGEST_BUDGET_CHARS, profile: dict = config.EXECUTOR) -> str:
+                  budget: int | None = None, profile: dict = config.EXECUTOR) -> str:
     """Злити новий шматок великого документа в дайджест (файл-памʼять). Якщо
     результат вийшов за бюджет — стиснути ще раз тим самим промптом (він і так
     зливає/стискає, тож повторний прохід над самим дайджестом природно коротшає).
     profile: за дефолтом EXECUTOR (Qwen, код); chat-режим передає CHAT_EXECUTOR
     (gemma) — інакше аналітичний текст обробляла б кодинг-модель."""
     client = client or OllamaClient()
+    budget = budget or limits.get().digest
     user = (f"Поточний дайджест:\n{digest or '(порожньо — це перший шматок)'}\n\n"
             f"Новий шматок документа:\n{chunk}")
     msg = client.chat(
