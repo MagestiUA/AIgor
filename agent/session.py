@@ -34,6 +34,7 @@ class Session:
     context_summary: str = ""                             # стислий підсумок розмови (контекст-памʼять)
     topics: list = field(default_factory=list)            # назви тем (chat), що траплялись у цій сесії
     project_id: str = ""                                  # chat-проект (chat_projects.py), "" — жодного
+    compressions: list = field(default_factory=list)      # історія стиснень контексту [{what,before,after,name,ts}]
     messages: list = field(default_factory=list)          # [{role, content, kind, meta}]
     created: float = field(default_factory=time.time)
     updated: float = field(default_factory=time.time)

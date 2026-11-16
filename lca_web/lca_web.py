@@ -5,6 +5,8 @@ G3: керування сесіями через бекенд (agent/session.py)
 Прив'язки runner (answer/shell/plan/edit) — G4.
 """
 import asyncio
+import functools
+import json
 import re
 import threading
 import time
@@ -17,6 +19,7 @@ from reflex_base.style import set_color_mode
 from agent import attachments as A
 from agent import config
 from agent import convo
+from agent import context_view as cv
 from agent import limits
 from agent import logs
 from agent import chat_projects as CP
@@ -54,6 +57,15 @@ _CONFIRMS: dict = {}
 _STOP_EVENTS: dict = {}
 
 # Вкладення зберігаються на диску (agent/attachments.py), не в пам'яті.
+
+
+@functools.lru_cache(maxsize=2)
+def _tools_tokens(chat: bool) -> int:
+    reg = default_registry()
+    schema = reg.schema()
+    if chat:
+        schema = [t for t in schema if t["function"]["name"] in State._READONLY_TOOLS]
+    return cv.tools_tokens(schema)
 
 
 def get_client():
@@ -146,6 +158,8 @@ class State(rx.State):
     queued_text: str = ""                  # повідомлення, що чекає, поки модель зайнята
     stopping: bool = False                 # стоп запитано, чекаємо переривання
     context_summary: str = ""              # контекст-памʼять розмови (підсумок)
+    compress_log: list[dict] = []          # історія стискань контексту цієї сесії
+    ctx_open: bool = False                 # бічна панель «Контекст»
     session_topics: list[str] = []         # теми (chat), що траплялись у цій сесії
     # Проекти chat-режиму (аналог Claude/ChatGPT Projects) — лише для mode="chat".
     projects: list[dict] = []
@@ -244,6 +258,76 @@ class State(rx.State):
         model = f"{self.tok_model} · " if self.tok_model else ""
         return f"{model}↑{ctx} ctx · ↓{self.tok_out} out · {self.tok_tps} tok/s"
 
+    @rx.event
+    def toggle_ctx(self):
+        self.ctx_open = not self.ctx_open
+
+    @rx.var
+    def ctx_report(self) -> str:
+        """Розбивка контексту поточного чату (JSON-рядок; решта ctx_* розбирають його).
+        Токени — оцінка за символами (agent/context_view.py). Залежності відстежуються
+        прямими зверненнями до self.* (messages, summary, compress_log, вкладення…)."""
+        lim = limits.get()
+        chat = self.mode == "chat"
+        msgs = [dict(m) for m in self.messages]
+        _ = self.attachments                                  # перерахунок при зміні чипів
+        cid = self.current_id
+        names = A.list_saved(cid) if cid else []
+        last = next((m for m in reversed(msgs) if m.get("role") == "user"), {})
+        cur = set(last.get("attachments") or [])
+        cur_size = sum(a["size"] for a in names if a["name"] in cur)
+        inline_ok = bool(cur) and cur_size <= lim.inline
+        atts = [{"name": a["name"], "size": a["size"], "inline": inline_ok and a["name"] in cur}
+                for a in names]
+        project = ""
+        if chat and self.chat_project_id:
+            pr = CP.load_project(self.chat_project_id)
+            project = CP.as_system_block(pr.prompt) if pr else ""
+        elif not chat and self.project_root:
+            project = load_project_doc(self.project_root) or ""
+        topics_note = topics.available_topics_note(topics.list_topics()) if chat else ""
+        from agent.agent_loop import SYSTEM as EXEC_SYSTEM
+        rep = cv.build(
+            window=lim.context_tokens, system=CHAT_SYSTEM if chat else EXEC_SYSTEM,
+            tools_tok=_tools_tokens(chat), project=project, topics_note=topics_note,
+            summary=self.context_summary,
+            summary_budget=lim.summary // 3 if chat else lim.summary,
+            topic_budget=lim.topic, digest_budget=lim.digest, messages=msgs,
+            history_window=lim.history_msgs, attachments=atts, inline_budget=lim.inline,
+            compressions=[dict(c) for c in self.compress_log])
+        return json.dumps(rep, ensure_ascii=False)
+
+    @rx.var
+    def ctx_rows(self) -> list[dict[str, str]]:
+        rep = json.loads(self.ctx_report)
+        return [{"label": r["label"], "tokens_label": r["tokens_label"], "pct_label": f"{r['pct']}%",
+                 "color": r["color"], "note": r["note"], "compress": r["compress"]}
+                for r in rep["rows"]]
+
+    @rx.var
+    def ctx_segments(self) -> list[dict[str, str]]:
+        rep = json.loads(self.ctx_report)
+        segs = [{"width": f"{r['pct']}%", "color": r["color"]} for r in rep["rows"] if r["pct"] > 0]
+        return segs
+
+    @rx.var
+    def ctx_pct(self) -> int:
+        return int(json.loads(self.ctx_report)["used_pct"])
+
+    @rx.var
+    def ctx_chip(self) -> str:
+        return f"Контекст {self.ctx_pct}%"
+
+    @rx.var
+    def ctx_total(self) -> str:
+        rep = json.loads(self.ctx_report)
+        return f"≈{rep['used_label']} / {rep['window_label']}"
+
+    @rx.var
+    def ctx_free(self) -> str:
+        rep = json.loads(self.ctx_report)
+        return f"{rep['free_label']}  {rep['free_pct']}%"
+
     @rx.var
     def ui_font_js(self) -> str:
         """JS, що масштабує кореневий шрифт <html> — усі rem-based Tailwind-розміри
@@ -292,6 +376,7 @@ class State(rx.State):
         self.has_pending = False
         self.queued_text = ""
         self.context_summary = ""
+        self.compress_log = []
         self.session_topics = []
         self.chat_project_id = ""
         self.attachments = []
@@ -364,6 +449,7 @@ class State(rx.State):
         self.messages = [{"thinking": "", "attachments": [], **m} for m in s.messages]
         self.has_pending = s.pending_plan is not None
         self.context_summary = s.context_summary
+        self.compress_log = list(s.compressions)
         self.session_topics = list(s.topics)
         self.attachments = []     # чіпи — стейджинг до відправки; вкладення сесії на диску
         self._load_question(s.pending_question)
@@ -961,13 +1047,13 @@ class State(rx.State):
         suffix = suffix_match.group(0) if suffix_match else ""
         chunk_text = body[:suffix_match.start()] if suffix_match else body
         prev = memory.get(name, "")
-        events: list[str] = []
+        events: list[tuple] = []
         digest = await asyncio.to_thread(
             lambda: convo.update_digest(prev, chunk_text, client, profile=profile,
-                                        on_compress=lambda w, b, a: events.append(self._compress_msg(w, b, a, name))))
-        for ev in events:
+                                        on_compress=lambda w, b, a: events.append((w, b, a, name))))
+        if events:
             async with self:
-                self._append("assistant", ev, "note")
+                self._apply_compress_events(self.current_id, events)
         memory[name] = digest
         return f"=== {name} (дайджест прочитаного дотепер) ===\n{digest}{suffix}"
 
@@ -1341,8 +1427,8 @@ class State(rx.State):
         # chat: загальний підсумок розмови менше потрібен у деталях (деталі живуть у
         # темах нижче) — зменшуємо бюджет умовно втричі, як домовлено з користувачем.
         budget = limits.get().summary // 3 if chat else limits.get().summary
-        events: list[str] = []
-        note_cb = lambda w, b, a: events.append(self._compress_msg(w, b, a))     # noqa: E731
+        events: list[tuple] = []
+        note_cb = lambda w, b, a: events.append((w, b, a, ""))     # noqa: E731
         new = await asyncio.to_thread(
             lambda: convo.update_summary(cur, user_text, outcome, client, budget=budget, kind=kind,
                                          on_compress=note_cb))
@@ -1350,10 +1436,9 @@ class State(rx.State):
         if chat:
             new_topics = await asyncio.to_thread(
                 lambda: self._update_topic(user_text, outcome, cur_topics, client, note_cb))
-        for ev in events:                              # побажання розробників: казати про стиснення
+        if events:                                     # побажання розробників: казати про стиснення
             async with self:
-                if self.current_id == cid:
-                    self._append("assistant", ev, "note")
+                self._apply_compress_events(cid, events)
         async with self:
             if self.current_id == cid:                # та сама сесія — оновити й у State
                 self.context_summary = new
@@ -1363,6 +1448,20 @@ class State(rx.State):
                 s.context_summary = new
                 s.topics = new_topics
                 sess.save_session(s)
+
+    def _apply_compress_events(self, cid: str, events: list[tuple]) -> None:
+        """Подія стиснення -> нотатка в чаті (якщо ця сесія відкрита) + запис в історію
+        стискань сесії (панель «Контекст»). Викликати всередині `async with self`."""
+        recs = [{"what": w, "before": b, "after": a, "name": n, "ts": time.time()}
+                for (w, b, a, n) in events]
+        if self.current_id == cid:
+            for (w, b, a, n) in events:
+                self._append("assistant", self._compress_msg(w, b, a, n), "note")
+            self.compress_log = [*self.compress_log, *recs]
+        if cid:
+            s = sess.load_session(cid)
+            s.compressions = [*s.compressions, *recs]
+            sess.save_session(s)
 
     @staticmethod
     def _compress_msg(what: str, before: int, after: int, name: str = "") -> str:
@@ -2237,7 +2336,7 @@ def references_row() -> rx.Component:
 
 def token_bar() -> rx.Component:
     """Лічильник токенів поточного запиту + індикатор черги — над полем вводу."""
-    return rx.cond(
+    left = rx.cond(
         (State.tok_out > 0) | State.busy,
         rx.hstack(
             rx.cond(State.busy, rx.spinner(size="1"), rx.fragment()),
@@ -2249,10 +2348,17 @@ def token_bar() -> rx.Component:
                           class_name="items-center gap-1"),
                 rx.fragment(),
             ),
-            class_name="items-center gap-2 self-start px-1 mb-1",
+            class_name="items-center gap-2",
         ),
-        rx.box(class_name="h-0"),
+        rx.fragment(),
     )
+    chip = rx.hstack(
+        rx.icon("gauge", size=12),
+        rx.text(State.ctx_chip, class_name="text-xs"),
+        on_click=State.toggle_ctx, title="Що займає контекст",
+        class_name="items-center gap-1 text-gray-500 hover:text-gray-200 cursor-pointer",
+    )
+    return rx.hstack(left, rx.spacer(), chip, class_name="items-center w-full px-1 mb-1")
 
 
 def input_box() -> rx.Component:
@@ -2441,6 +2547,70 @@ def scroll_down_button() -> rx.Component:
     )
 
 
+def ctx_row(r: dict) -> rx.Component:
+    return rx.vstack(
+        rx.hstack(
+            rx.box(class_name="w-3 h-3 rounded-sm shrink-0", style={"backgroundColor": r["color"]}),
+            rx.text(r["label"], class_name="text-sm text-gray-200 grow"),
+            rx.text(r["tokens_label"], class_name="text-sm text-gray-300 font-mono"),
+            rx.text(r["pct_label"], class_name="text-xs text-gray-500 w-14 text-right font-mono"),
+            class_name="items-center gap-2 w-full",
+        ),
+        rx.cond(r["note"] != "", rx.text(r["note"], class_name="text-xs text-gray-500 pl-5")),
+        rx.cond(
+            r["compress"] != "",
+            rx.hstack(rx.icon("shrink", size=12, class_name="shrink-0 mt-0.5 text-amber-400"),
+                      rx.text(r["compress"], class_name="text-xs text-amber-400/90"),
+                      class_name="items-start gap-1 pl-5"),
+        ),
+        gap="1", class_name="w-full",
+    )
+
+
+def context_panel() -> rx.Component:
+    """Бічна панель «Контекст» (як у Claude Code): що займає вікно моделі + дані про
+    стиснення біля пунктів, що можуть стискатись."""
+    return rx.cond(
+        State.ctx_open,
+        rx.vstack(
+            rx.hstack(
+                rx.heading("Контекст", size="4"),
+                rx.spacer(),
+                rx.icon_button(rx.icon("x", size=16), variant="ghost", size="1", on_click=State.toggle_ctx),
+                class_name="w-full items-center",
+            ),
+            rx.hstack(
+                rx.text(State.ctx_pct, "% використано", class_name="text-sm text-gray-200"),
+                rx.spacer(),
+                rx.text(State.ctx_total, class_name="text-sm text-gray-400 font-mono"),
+                class_name="w-full items-center",
+            ),
+            rx.hstack(
+                rx.foreach(State.ctx_segments,
+                           lambda s: rx.box(style={"width": s["width"], "backgroundColor": s["color"]},
+                                            class_name="h-full")),
+                class_name="w-full h-2 rounded-full overflow-hidden gap-px",
+                style={"backgroundColor": "#333"},
+            ),
+            rx.vstack(rx.foreach(State.ctx_rows, ctx_row), gap="3", class_name="w-full mt-2"),
+            rx.hstack(
+                rx.box(class_name="w-3 h-3 rounded-sm shrink-0", style={"backgroundColor": "#4b4b4b"}),
+                rx.text("Вільно", class_name="text-sm text-gray-400 grow"),
+                rx.text(State.ctx_free, class_name="text-sm text-gray-400 font-mono"),
+                class_name="items-center gap-2 w-full mt-1",
+            ),
+            rx.text("Токени — оцінка за кількістю символів. Підсумок розмови, дайджести файлів і "
+                    "нотатки тем стискаються автоматично при перевищенні порогу; про кожне "
+                    "стиснення Ігорь пише в чаті й у лозі.",
+                    class_name="text-xs text-gray-600 mt-3"),
+            gap="3",
+            class_name="w-[340px] shrink-0 h-full overflow-y-auto p-4 border-l border-white/10",
+            style={"backgroundColor": PANEL},
+        ),
+        rx.fragment(),
+    )
+
+
 def main_area() -> rx.Component:
     return rx.cond(
         State.messages,
@@ -2474,6 +2644,7 @@ def index() -> rx.Component:
     return rx.hstack(
         sidebar(),
         main_area(),
+        context_panel(),
         rename_dialog(),
         project_dialog(),
         move_dialog(),
