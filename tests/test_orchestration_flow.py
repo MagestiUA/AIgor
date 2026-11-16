@@ -10,7 +10,7 @@ import types
 from pathlib import Path
 
 import lca_web.lca_web as W
-from agent import limits
+from agent import limits, projectmap
 from agent.agent_loop import ITER_LIMIT_MSG
 from agent.memory import TaskState
 
@@ -84,6 +84,15 @@ def run(state, plan, verdicts=None):
 
 
 def main() -> None:
+    real_store = projectmap.STORE_DIR
+    projectmap.STORE_DIR = Path(tempfile.mkdtemp()) / "projects"     # профіль користувача не чіпаємо
+    try:
+        _main()
+    finally:
+        projectmap.STORE_DIR = real_store
+
+
+def _main() -> None:
     root = Path(tempfile.mkdtemp())
 
     # 1) усе добре: кроки бачать результати попередніх + змінені файли; звірка проходить без повторів

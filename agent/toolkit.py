@@ -29,6 +29,7 @@ class ToolContext:
     confirm: Callable | None = None     # (text) -> bool
     attachments: list = field(default_factory=list)   # метадані вкладень (без вмісту)
     attachments_dir: Path | None = None  # тека з файлами вкладень сесії (для read_attachment)
+    track_project: bool = False          # оновлювати «Карту проєкту» при read/write (код-режим)
 
 
 @dataclass
@@ -70,6 +71,7 @@ class ToolRegistry:
         t0 = _time.monotonic()
         try:
             out = t.handler(args or {}, ctx)
+            _track_project(name, args or {}, out, ctx)
         except Exception as e:
             log.error("тул %s упав за %.2fс (аргументи: %s): %s", name, _time.monotonic() - t0,
                       ",".join((args or {}).keys()), e, exc_info=True)
@@ -78,6 +80,38 @@ class ToolRegistry:
                  ",".join((args or {}).keys()), len(out or ""),
                  f" | {logs.clip(args)} -> {logs.clip(out)}" if logs.content_enabled() else "")
         return out
+
+
+def _track_project(name: str, args: dict, out: str, ctx) -> None:
+    """Після читання/зміни файлу оновлюємо «Карту проєкту»: що було, коли читали, і свіжий скелет
+    після власних правок. Помилки карти ніколи не ламають тул."""
+    if not getattr(ctx, "track_project", False):
+        return
+    try:
+        from . import activity, projectmap
+        if not activity.result_ok(out):
+            return
+        if name == "read_file" and args.get("path"):
+            projectmap.mark_read(ctx.root, args["path"])
+        elif name in ("write_file", "edit_file") and args.get("path"):
+            projectmap.refresh_file(ctx.root, args["path"])
+        elif name == "create_from_source" and args.get("target"):
+            projectmap.refresh_file(ctx.root, args["target"])
+    except Exception:                                      # noqa: BLE001
+        logs.get("tools").exception("оновлення карти проєкту не вдалось")
+
+
+def h_project_note(args, ctx):
+    from . import projectmap
+    rel = (args.get("path") or "").strip()
+    note = (args.get("note") or "").strip()
+    if not rel or not note:
+        return "помилка: потрібні path і note"
+    p = _resolve(ctx, rel)
+    if not p.is_file():
+        return f"файл не знайдено: {rel}"
+    ok = projectmap.set_note(ctx.root, str(p.relative_to(ctx.root.resolve())), note)
+    return "нотатку збережено в карті проєкту" if ok else "не вдалось зберегти нотатку"
 
 
 # ── Обробники ────────────────────────────────────────────────────────────────
@@ -276,6 +310,12 @@ def default_registry() -> ToolRegistry:
                      "offset": {"type": "integer",
                                 "description": "позиція в символах, з якої читати (за замовчуванням 0)"}},
                     ["path"], h_read_file))
+    r.register(Tool("project_note",
+                    "Записати/оновити коротку нотатку про файл у «Карті проєкту» (навіщо файл, де що шукати). "
+                    "Викликай, коли побачив, що опис файлу застарів або ти зрозумів, що він робить. Лише ПРО "
+                    "файл проєкту; сам проєкт не змінюється.",
+                    {"path": {"type": "string"}, "note": {"type": "string", "description": "1–2 речення"}},
+                    ["path", "note"], h_project_note))
     r.register(Tool("read_attachment",
                     "Прочитати файл, ПРИКРІПЛЕНИЙ користувачем до повідомлення. Передай "
                     "ім'я файлу зі списку прикріплених (можна частину імені — пошук "

@@ -24,6 +24,7 @@ from agent import convo
 from agent import activity as act
 from agent import context_view as cv
 from agent import orchestration as orch
+from agent import projectmap
 from agent.loopguard import (CONTEXT_FULL_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from agent import limits
 from agent import logs
@@ -388,10 +389,11 @@ class State(rx.State):
         elif not chat and self.project_root:
             project = load_project_doc(self.project_root) or ""
         topics_note = topics.available_topics_note(topics.list_topics()) if chat else ""
+        pmap_text = projectmap.context_block(self.project_root) if (not chat and self.project_root) else ""
         from agent.agent_loop import SYSTEM as EXEC_SYSTEM
         rep = cv.build(
             window=lim.context_tokens, system=CHAT_SYSTEM if chat else EXEC_SYSTEM,
-            tools_tok=_tools_tokens(chat), project=project, topics_note=topics_note,
+            tools_tok=_tools_tokens(chat), project=project, project_map=pmap_text, topics_note=topics_note,
             summary=self.context_summary,
             summary_budget=lim.summary // 3 if chat else lim.summary,
             topic_budget=lim.topic, digest_budget=lim.digest, messages=msgs,
@@ -954,6 +956,9 @@ class State(rx.State):
         ctx = (f"Project root: {root}\n\nЗагальна задача: {plan.task}\n"
                f"План і результати вже виконаних кроків (ти виконуєш ЛИШЕ крок #{step.id}):\n"
                f"{render_for_planner(plan)}")
+        pmap = projectmap.context_block(root)             # свіжа: попередній крок міг змінити файли
+        if pmap:
+            ctx += "\n\n" + pmap
         if self.context_summary:
             ctx += f"\n{convo.as_context(self.context_summary)}"
         if att_note:
@@ -1095,7 +1100,7 @@ class State(rx.State):
         return ToolContext(root=Path(root),
                            permissions={"edits": "auto", "shell": self.shell},
                            client=client, confirm=None,
-                           attachments_dir=A.session_dir(self.current_id))
+                           attachments_dir=A.session_dir(self.current_id), track_project=True)
 
     async def _dispatch_tool(self, reg, name: str, args: dict, ctx: ToolContext) -> str:
         """Виконати тул + показати подію в живій стрічці («що виконує і який результат»)."""
@@ -1636,7 +1641,7 @@ class State(rx.State):
             cur_atts = list(self.messages[-1].get("attachments", []) or []) if self.messages else []
         tctx = ToolContext(root=Path(root) if root else Path.home(),
                            permissions={"edits": "off", "shell": "off"}, client=client,
-                           attachments_dir=A.session_dir(cid))
+                           attachments_dir=A.session_dir(cid), track_project=bool(root))
         all_names = [n["name"] for n in A.list_saved(cid)]
         other_names = [n for n in all_names if n not in cur_atts]
         # cur_atts малі сумарно -> вшиваємо вмістом напряму (менше тул-раундів);
@@ -1892,6 +1897,10 @@ class State(rx.State):
 
         client = await asyncio.to_thread(get_client)
         su, so = text, ""
+        pmap = ""                                     # «Карта проєкту» — у контекст усіх режимів код-режиму
+        if not chat_mode and root:
+            pmap = await asyncio.to_thread(lambda: projectmap.context_block(root))
+            pmap = (pmap + "\n\n") if pmap else ""
 
         if chat_mode:
             so = await self._chat_reply(text, client, att_note)
@@ -1912,13 +1921,14 @@ class State(rx.State):
                 async with self:
                     self.status = "Аналізую код…"
                 ctx = await asyncio.to_thread(lambda: build_context(root, refs, text))
-                so = await self._answer_reply(text, convo.as_context(summary) + dialogue + ctx,
+                so = await self._answer_reply(text, convo.as_context(summary) + dialogue + pmap + ctx,
                                               att_note, root, client)
             elif mode == "shell":
                 async with self:
                     self.status = "Виконую запит…"
                 ctx = self._exec_ctx(root, client)
-                shell_ctx = f"Project root: {root}\n{convo.as_context(summary)}" if summary else f"Project root: {root}"
+                shell_ctx = (f"Project root: {root}\n{pmap}{convo.as_context(summary)}" if summary
+                             else f"Project root: {root}\n{pmap}")
                 if att_note:
                     shell_ctx += "\n" + att_note
                 final, _ = await self._run_tool_step(text, ctx, context=shell_ctx,
@@ -1930,7 +1940,7 @@ class State(rx.State):
                 doc = await asyncio.to_thread(lambda: load_project_doc(root))
                 struct = await asyncio.to_thread(lambda: scan_structure(root))
                 su2, so = await self._deliberate_flow(
-                    task_text, convo.as_context(summary) + dialogue + struct, doc, [], root, plan_first, client)
+                    task_text, convo.as_context(summary) + dialogue + pmap + struct, doc, [], root, plan_first, client)
                 su = su2 if not approved else su
 
         if (so or "").strip():

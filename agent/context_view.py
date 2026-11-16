@@ -15,7 +15,8 @@ CHARS_PER_TOKEN = 2.8
 
 # Кольори сегментів (узгоджені зі списком)
 COLORS = {"system": "#e8803a", "tools": "#2fb392", "summary": "#a78bfa", "topics": "#38bdf8",
-          "messages": "#4f8cff", "attachments": "#e5c04b", "project": "#f472b6", "free": "#4b4b4b"}
+          "messages": "#4f8cff", "attachments": "#e5c04b", "project": "#f472b6", "map": "#34d399",
+          "free": "#4b4b4b"}
 
 
 def est_tokens(text: str) -> int:
@@ -50,7 +51,8 @@ def compress_note(compressions: list[dict], what: str, limit_chars: int | None =
     return (prefix + " · ".join(parts)) if parts else ""
 
 
-def build(*, window: int, system: str, tools_tok: int, project: str = "", topics_note: str = "",
+def build(*, window: int, system: str, tools_tok: int, project: str = "", project_map: str = "",
+          topics_note: str = "",
           summary: str = "", summary_budget: int = 0, topic_budget: int = 0, digest_budget: int = 0,
           messages: list[dict] | None = None, history_window: int = 20,
           attachments: list[dict] | None = None, inline_budget: int = 0,
@@ -73,6 +75,9 @@ def build(*, window: int, system: str, tools_tok: int, project: str = "", topics
         add("project", "Проєкт (інструкції / AGENT.md)", est_tokens(project),
             note=f"{_fmt_chars(len(project))} симв.")
     add("tools", "Інструменти", tools_tok)
+    if project_map:
+        add("map", "Карта проєкту", est_tokens(project_map),
+            note=f"{_fmt_chars(len(project_map))} симв.; авто-складена, зберігається в профілі")
     add("summary", "Підсумок розмови", est_tokens(summary),
         note=f"{_fmt_chars(len(summary))} симв." if summary else "порожній",
         compress=compress_note(compressions, "підсумок розмови", summary_budget))
