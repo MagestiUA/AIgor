@@ -53,15 +53,18 @@ _STOP_EVENTS: dict = {}
 
 
 def get_client():
-    """Єдиний клієнт на процес; бекенд за config.BACKEND (ollama | openai)."""
+    """Єдиний клієнт на процес; бекенд/адреса/ключ — з налаштувань (agent.backend).
+    reset_client() скидає кеш після зміни налаштувань."""
     global _CLIENT
     if _CLIENT is None:
-        if config.BACKEND == "openai":
-            from agent.llm_openai import OpenAIClient
-            _CLIENT = OpenAIClient()
-        else:
-            _CLIENT = OllamaClient()
+        from agent import backend
+        _CLIENT = backend.make_client()
     return _CLIENT
+
+
+def reset_client() -> None:
+    global _CLIENT
+    _CLIENT = None
 
 
 SCROLL_SETUP_JS = """
@@ -158,6 +161,17 @@ class State(rx.State):
     theme: str = "dark"
     font_chat: int = 14
     font_ui: int = 13
+    # Підключення до LLM (agent/backend.py): бекенд/адреса/порт/модель. Сам API-ключ у
+    # State НЕ тримаємо (State їде у фронтенд) — лише поле вводу нового ключу й прапор.
+    llm_backend: str = "ollama"
+    llm_host: str = ""
+    llm_port: str = ""
+    llm_model: str = ""
+    llm_key_input: str = ""
+    llm_key_saved: bool = False
+    llm_test_msg: str = ""
+    llm_test_ok: bool = False
+    llm_testing: bool = False
     # планувальник-діалог (#2+#5): питання/вибір, що очікує відповіді
     has_question: bool = False
     q_text: str = ""
@@ -559,6 +573,16 @@ class State(rx.State):
         self.theme = d.get("theme", "auto")
         self.font_chat = d.get("font_chat", 14)
         self.font_ui = d.get("font_ui", 13)
+        from agent import backend
+        eff = backend.resolve(d)
+        self.llm_backend = eff["backend"]
+        self.llm_model = d.get("llm_model", "")
+        self.llm_key_saved = bool(d.get("llm_api_key"))
+        self.llm_host, self.llm_port = d.get("llm_host", ""), str(d.get("llm_port", ""))
+        if not self.llm_host and eff["backend"] == "openai":      # дефолт із .env/config
+            from urllib.parse import urlparse
+            u = urlparse(eff["base_url"])
+            self.llm_host, self.llm_port = u.hostname or "", str(u.port or "")
         # Тему застосовує next-themes сам (зберігає в localStorage між перезавантаженнями);
         # set_color_mode НЕ можна викликати з бекенд-хендлера — лише шрифт через DOM.
         # PASTE_SETUP_JS — одноразово вішає document-listener вставки файлів (Ctrl+V).
@@ -598,6 +622,60 @@ class State(rx.State):
         self.font_ui = max(11, min(24, int(val)))     # збігається зі слайдером 11..24
         self._persist_settings()
         return rx.call_script(self.ui_font_js)
+
+    # ── Підключення до LLM ─────────────────────────────────────────────────────
+    @rx.event
+    def set_llm_backend(self, v: str | list[str]):
+        self.llm_backend = v[0] if isinstance(v, list) else v
+
+    @rx.event
+    def set_llm_host(self, v: str):
+        self.llm_host = v
+
+    @rx.event
+    def set_llm_port(self, v: str):
+        self.llm_port = "".join(ch for ch in v if ch.isdigit())[:5]
+
+    @rx.event
+    def set_llm_model(self, v: str):
+        self.llm_model = v
+
+    @rx.event
+    def set_llm_key_input(self, v: str):
+        self.llm_key_input = v
+
+    @rx.event
+    def save_llm_settings(self):
+        """Зберегти підключення й скинути закешований клієнт — наступний запит піде
+        вже на нову адресу/ключ. Порожнє поле ключа = лишити збережений."""
+        from agent import settings as S
+        cur = S.load()
+        new = {**cur, "llm_backend": self.llm_backend, "llm_host": self.llm_host.strip(),
+               "llm_port": self.llm_port.strip(), "llm_model": self.llm_model.strip()}
+        if self.llm_key_input.strip():
+            new["llm_api_key"] = self.llm_key_input.strip()
+        S.save(new)
+        reset_client()
+        self.llm_key_input = ""
+        self.llm_key_saved = bool(new.get("llm_api_key"))
+        self.llm_test_msg, self.llm_test_ok = "Збережено.", True
+
+    @rx.event(background=True)
+    async def test_llm_connection(self):
+        """Перевірити адресу/порт/ключ (GET /models) до збереження; підставляє модель."""
+        from agent import backend, settings as S
+        async with self:
+            if self.llm_testing:
+                return
+            self.llm_testing, self.llm_test_msg = True, "Перевіряю…"
+            host, port, typed = self.llm_host, self.llm_port, self.llm_key_input.strip()
+        key = typed or S.load().get("llm_api_key", "")
+        ok, msg, models = await asyncio.to_thread(
+            lambda: backend.test_connection(backend.build_base_url(host, port), key))
+        async with self:
+            self.llm_testing, self.llm_test_ok, self.llm_test_msg = False, ok, msg
+            if ok and models and not self.llm_model.strip():
+                self.llm_model = models[0]
 
     # ── Вкладення (#10) ────────────────────────────────────────────────────────
     @rx.event
@@ -1771,6 +1849,46 @@ def mode_switch() -> rx.Component:
     )
 
 
+def llm_connection_section() -> rx.Component:
+    """Підключення до LLM: локальна Ollama або OpenAI-сумісний сервер (vLLM)."""
+    def field(label, ctrl):
+        return rx.hstack(rx.text(label, class_name="text-sm text-gray-300 w-24 shrink-0"),
+                         ctrl, class_name="items-center gap-3 w-full")
+    remote = rx.vstack(
+        field("Адреса", rx.input(value=State.llm_host, on_change=State.set_llm_host,
+                                 placeholder="напр. llm.example.com", class_name="flex-1")),
+        field("Порт", rx.input(value=State.llm_port, on_change=State.set_llm_port,
+                               placeholder="8000", class_name="flex-1")),
+        field("API-ключ", rx.input(
+            value=State.llm_key_input, on_change=State.set_llm_key_input, type="password",
+            placeholder=rx.cond(State.llm_key_saved, "збережено (введіть, щоб замінити)", "ваш ключ"),
+            class_name="flex-1")),
+        field("Модель", rx.input(value=State.llm_model, on_change=State.set_llm_model,
+                                 placeholder="авто (перша на сервері)", class_name="flex-1")),
+        gap="2", class_name="w-full",
+    )
+    return rx.vstack(
+        rx.text("Підключення до LLM", class_name="text-xs text-gray-500 uppercase tracking-wide"),
+        rx.segmented_control.root(
+            rx.segmented_control.item("Локально (Ollama)", value="ollama"),
+            rx.segmented_control.item("Сервер (OpenAI API)", value="openai"),
+            value=State.llm_backend, on_change=State.set_llm_backend, size="2", class_name="w-full",
+        ),
+        rx.cond(State.llm_backend == "openai", remote, rx.fragment()),
+        rx.hstack(
+            rx.button("Перевірити", variant="soft", on_click=State.test_llm_connection,
+                      loading=State.llm_testing),
+            rx.button("Зберегти", on_click=State.save_llm_settings),
+            class_name="gap-2",
+        ),
+        rx.cond(State.llm_test_msg != "",
+                rx.text(State.llm_test_msg,
+                        class_name=rx.cond(State.llm_test_ok, "text-xs text-green-400",
+                                           "text-xs text-red-400"))),
+        gap="2", class_name="w-full mb-4",
+    )
+
+
 def settings_dialog() -> rx.Component:
     def font_slider(label, value, on_change, min_v, max_v):
         return rx.hstack(
@@ -1798,6 +1916,7 @@ def settings_dialog() -> rx.Component:
                     ),
                     class_name="w-full items-center mb-4",
                 ),
+                llm_connection_section(),
                 # Тема
                 rx.text("Тема", class_name="text-xs text-gray-500 uppercase tracking-wide mb-1"),
                 rx.segmented_control.root(

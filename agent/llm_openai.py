@@ -86,10 +86,11 @@ def _split_think(content: str, thinking: str) -> tuple[str, str]:
 class OpenAIClient:
     def __init__(self, base_url: str = config.REMOTE_BASE_URL, model: str = config.REMOTE_MODEL,
                  key_env: str = config.REMOTE_KEY_ENV, wake_timeout: float = 660.0,
-                 retry_delay: float = 15.0):
+                 retry_delay: float = 15.0, api_key: str = ""):
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.key_env = key_env
+        self.api_key = api_key                # з налаштувань UI; порожній -> env
         self.wake_timeout = wake_timeout      # скільки чекаємо, поки сервер прокинеться
         self.retry_delay = retry_delay
         self.last_stats: dict = {}
@@ -97,10 +98,10 @@ class OpenAIClient:
 
     # ── Допоміжне ───────────────────────────────────────────────────────────
     def _headers(self) -> dict:
-        key = os.environ.get(self.key_env, "")
+        key = self.api_key or os.environ.get(self.key_env, "")
         if not key:
-            raise RuntimeError(f"Не задано змінну середовища {self.key_env} (ключ LLM-сервера). "
-                               "Додайте її й перезапустіть застосунок.")
+            raise RuntimeError("Не задано API-ключ LLM-сервера. Вкажіть його в Налаштуваннях "
+                               f"(або змінну середовища/.env {self.key_env}).")
         return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
     def _payload(self, messages, tools, profile, fmt, stream: bool) -> dict:

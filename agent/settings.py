@@ -7,6 +7,12 @@ DEFAULT = {
     "font_chat": 14,
     "font_ui": 13,
     "last_session_id": "",     # відновлюємо останній відкритий чат після перезапуску
+    # Підключення до LLM (див. agent/backend.py). Порожнє = дефолт із .env/config.
+    "llm_backend": "",         # "" | "ollama" | "openai"
+    "llm_host": "",
+    "llm_port": "",
+    "llm_api_key": "",         # лежить у файлі користувача відкритим текстом
+    "llm_model": "",           # "" = перша модель із /v1/models
 }
 
 def load() -> dict:
