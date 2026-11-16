@@ -200,7 +200,9 @@ def _open_window(url: str, log) -> None:
     # closing — синхронна подія (блокує закриття до завершення хендлера),
     # тож геометрія читається ДО того, як вікно (і його властивості) зникне.
     window.events.closing += lambda: _save_geometry(window)
-    webview.start()
+    from agent import serve
+    icon = serve.bundle_root() / "assets" / "igor.ico"       # іконка вікна (у .exe беремо з вбудованих assets)
+    webview.start(icon=str(icon) if icon.is_file() else None)
     log.info("вікно закрито користувачем")
 
 

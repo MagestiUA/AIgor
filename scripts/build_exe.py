@@ -94,6 +94,7 @@ def main() -> None:
 
     # 3. PyInstaller
     cmd = [sys.executable, "-m", "PyInstaller", "--noconfirm", "--clean", "--onefile", "--name", name,
+           "--icon", stage / "assets" / "igor.ico",                  # іконка самого .exe (scripts/make_icon.py)
            "--distpath", ROOT / "dist", "--workpath", work / "pyi", "--specpath", work,
            "--paths", stage,
            "--add-data", f"{client};web_client", "--add-data", f"{stage / 'rxconfig.py'};.",
