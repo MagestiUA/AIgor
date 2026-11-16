@@ -218,14 +218,14 @@ def h_run_shell(args, ctx):
     if mode == "ask":
         if ctx.confirm and not ctx.confirm(f"Виконати: {cmd}"):
             return "команду відхилено користувачем"
-        r = T.run_shell(cmd, cwd=str(ctx.root), allow_all=True)
+        r = T.run_shell(cmd, cwd=str(ctx.root), allow_all=True, use_shell=True)
     elif mode == "smart":
         if classify(cmd) == "danger":
             if ctx.confirm and not ctx.confirm(f"⚠ Небезпечна команда:\n{cmd}"):
                 return "команду відхилено користувачем"
-        r = T.run_shell(cmd, cwd=str(ctx.root), allow_all=True)
+        r = T.run_shell(cmd, cwd=str(ctx.root), allow_all=True, use_shell=True)
     elif mode == "auto":
-        r = T.run_shell(cmd, cwd=str(ctx.root), allow_all=True)
+        r = T.run_shell(cmd, cwd=str(ctx.root), allow_all=True, use_shell=True)
     else:  # allowlist
         r = T.run_shell(cmd, cwd=str(ctx.root))
         if not r.allowed:

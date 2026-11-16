@@ -1044,7 +1044,7 @@ class State(rx.State):
                 if kind == "stop":
                     final = guard.stuck_message(reason)
                     break
-                messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason)})
+                messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason, last=guard.last_result[:300])})
                 async with self:
                     self._append("assistant", f"⚠ Помітив повтор без прогресу ({reason}) — прошу змінити підхід.", "note")
             ls = getattr(client, "last_stats", None) or {}

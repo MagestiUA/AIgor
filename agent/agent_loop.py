@@ -41,6 +41,12 @@ SYSTEM = (
     "Use for: 'python -m venv .venv', 'pip install -r requirements.txt', 'pytest', etc. "
     "For venv pip use: '.venv\\Scripts\\pip install ...' (Windows) or '.venv/bin/pip install ...' (Linux). "
     "Do NOT use run_shell to create directories or copy files — use write_file instead.\n"
+    "run_shell runs Windows PowerShell 5.1 with stdin closed (interactive prompts fail "
+    "instead of hanging): chain commands with a semicolon (`&&` between commands is auto-translated), "
+    "use SINGLE quotes for literal strings (double quotes expand $variables; a double quote "
+    "INSIDE a single-quoted argument must be escaped as \\\" or it is lost), pass ssh/adb "
+    "remote commands as one quoted string, use ssh -o BatchMode=yes, and never run endless "
+    "commands (adb logcat without -d, tail -f).\n"
     "- web_search(query): look up docs, errors, external info.\n\n"
     "When changing an EXISTING file PRESERVE its style: indentation (tabs vs spaces), line "
     "endings and quote style; do not reformat code you were not asked to change. Prefer "
@@ -353,7 +359,7 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
                                       guard.last_result[:120].replace(chr(10), " "))
             if kind == "stop":
                 return guard.stuck_message(reason), log
-            messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason)})
+            messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason, last=guard.last_result[:300])})
         ls = getattr(client, "last_stats", None) or {}
         if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):
             logs.get("agent").warning("контекст майже заповнений: %s токенів", ls.get("prompt"))

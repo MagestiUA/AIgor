@@ -25,9 +25,9 @@ WINDOW = 24
 
 WARN_TEXT = (
     "You are repeating the same actions without making progress: {reason}. Do NOT repeat "
-    "them again. Read the actual error/output you received, work out why it fails and try a "
-    "DIFFERENT approach. If you are genuinely blocked, explain the blocker to the user and "
-    "finish the step WITHOUT further tool calls."
+    "them again. Last result you received: {last!r}. Work out why it fails and try a "
+    "DIFFERENT approach (different tool, different command). If you are genuinely blocked, "
+    "explain the blocker to the user and finish the step WITHOUT further tool calls."
 )
 STUCK_PREFIX = "крок зупинено: агент зациклився"       # callers трактують як невдачу кроку
 CONTEXT_FULL_PREFIX = "крок зупинено: контекст майже заповнений"

@@ -179,8 +179,85 @@ def is_allowed(command: str, allow) -> bool:
     )
 
 
+# Живий кейс (фідбек b_0.0.1): модель, якій промпт каже «Windows, PowerShell», слала `cd x && ...`,
+# `type`, `Get-ChildItem`, а виконання БЕЗ оболонки (shell=False) давало на кожну однакове
+# безіменне «не знайдено: [WinError 2]» — агент не розумів причини й крутився. Для режимів, де
+# команду дозволено (smart/ask/auto), тепер запускаємо справжній PowerShell.
+PS_PRELUDE = "[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); $OutputEncoding=[Console]::OutputEncoding; $ProgressPreference='SilentlyContinue'; "
+PS_EPILOGUE = "; if ($null -ne $LASTEXITCODE) { exit $LASTEXITCODE }"
+
+
+def ps_chain(command: str) -> str:
+    """Windows PowerShell 5.1 не розуміє `a && b` (це з PowerShell 7), а моделі пишуть його постійно.
+    Переписуємо верхньорівневі `&&` (ПОЗА лапками — `adb shell "cd /sdcard && ls"` лишається як є)
+    у `a; if ($?) { b }`. `||` не чіпаємо."""
+    parts, buf, quote, i = [], [], "", 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            buf.append(ch)
+            if ch == quote:
+                quote = ""
+        elif ch in "\"'":
+            quote = ch
+            buf.append(ch)
+        elif command.startswith("&&", i):
+            parts.append("".join(buf).strip())
+            buf = []
+            i += 2
+            continue
+        else:
+            buf.append(ch)
+        i += 1
+    parts.append("".join(buf).strip())
+    if len(parts) == 1 or not all(parts):
+        return command
+    out = parts[-1]
+    for part in reversed(parts[:-1]):
+        out = f"{part}; if ($?) {{ {out} }}"
+    return out
+
+
+def _run_powershell(command: str, cwd: str | None, timeout: int) -> "ShellResult":
+    """Справжній PowerShell: stdin закрито (ssh/adb не зависають на запиті пароля/підтвердження
+    ключа — одразу помилка), при таймауті вбиваємо ВСЕ ДЕРЕВО (інакше `adb logcat`/`ssh` лишаються
+    сиротами) і віддаємо частковий вивід.
+
+    Вивід беремо через ТИМЧАСОВІ ФАЙЛИ, а не канали: перший `adb ...` запускає фонового демона
+    (`adb fork-server`), що успадковує канали й тримає їх відкритими — `communicate()` тоді висить,
+    поки не вичерпається таймаут. Файл не потребує EOF: чекаємо лише завершення самого PowerShell."""
+    import tempfile
+    env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
+    nowin = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    with tempfile.TemporaryFile() as fo, tempfile.TemporaryFile() as fe:
+        proc = subprocess.Popen(
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+             "-Command", PS_PRELUDE + ps_chain(command) + PS_EPILOGUE],
+            cwd=cwd, stdin=subprocess.DEVNULL, stdout=fo, stderr=fe, env=env, creationflags=nowin)
+        timed_out = False
+        try:
+            proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL, creationflags=nowin)
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+        fo.seek(0)
+        fe.seek(0)
+        out = fo.read().decode("utf-8", errors="replace")
+        err = fe.read().decode("utf-8", errors="replace")
+    if timed_out:
+        tail = (out or err).strip()[-1500:]
+        return ShellResult(True, -1, "", f"timeout {timeout}s — команду та її дочірні процеси зупинено."
+                                         + (" Частковий вивід: " + tail if tail else ""))
+    return ShellResult(True, proc.returncode, out, err)
+
+
 def run_shell(command: str, cwd: str | None = None, timeout: int | None = None,
-              allow=None, allow_all: bool = False) -> ShellResult:
+              allow=None, allow_all: bool = False, use_shell: bool = False) -> ShellResult:
     """Виконати команду. За замовчуванням лише префікси з allow-list; allow_all=True
     (режим 'ask' після підтвердження) знімає це обмеження. shell=False, тож
     ланцюжки (`a; b`, `a && b`) не інтерпретуються — захист від ін'єкцій."""
@@ -188,6 +265,11 @@ def run_shell(command: str, cwd: str | None = None, timeout: int | None = None,
     timeout = config.SHELL_TIMEOUT if timeout is None else timeout
     if not allow_all and not is_allowed(command, allow):
         return ShellResult(False, -1, "", f"заблоковано allow-list: {command!r}")
+    if use_shell and os.name == "nt":
+        try:
+            return _run_powershell(command, cwd, timeout)
+        except FileNotFoundError:
+            pass                                   # немає powershell.exe — падаємо на запуск без оболонки
     try:
         # posix=False зберігає зворотні слеші (потрібно для Windows-шляхів C:\...),
         # але лишає лапки В токенах. Знімаємо парні обгорткові лапки, щоб
@@ -205,4 +287,5 @@ def run_shell(command: str, cwd: str | None = None, timeout: int | None = None,
     except subprocess.TimeoutExpired:
         return ShellResult(True, -1, "", f"timeout {timeout}s")
     except FileNotFoundError as e:
-        return ShellResult(True, -1, "", f"не знайдено: {e}")
+        prog = args[0] if args else command.split()[0] if command.split() else command
+        return ShellResult(True, -1, "", f"не знайдено програму {prog!r} ({e}). Команда виконується БЕЗ оболонки: вбудовані команди (cd, dir, type) та оператори (&&, |, >) недоступні — виклич програму напряму (python, git, pip) або використай інший тул (read_file, list_dir, write_file).")
