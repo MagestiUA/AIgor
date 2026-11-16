@@ -292,7 +292,8 @@ class State(rx.State):
         rows: list[dict[str, str]] = []
         if eff["backend"] == "openai":
             u = urlparse(eff["base_url"])
-            rows.append({"label": "Сервер", "value": f"{u.hostname}:{u.port}" if u.port else str(u.hostname)})
+            host = f"{u.hostname}:{u.port}" if u.port else str(u.hostname or "")
+            rows.append({"label": "Сервер", "value": host or "не налаштовано (Налаштування)"})
             rows.append({"label": "Модель", "value": eff["model"] or "авто"})
         else:
             rows.append({"label": "Бекенд", "value": "локально (Ollama)"})

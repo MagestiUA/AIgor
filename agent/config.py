@@ -53,7 +53,9 @@ def load_dotenv(path=None) -> None:
 import os as _os
 load_dotenv()       # .env може містити й LCA_BACKEND, і LLM_API_KEY — читаємо ДО них
 BACKEND = _os.environ.get("LCA_BACKEND", "ollama").lower()
-REMOTE_BASE_URL = _os.environ.get("LCA_REMOTE_URL", "http://llm.example.com:8000/v1")
+# Адреса сервера НЕ вшита в код (репозиторій публічний): її задають у Налаштуваннях застосунку
+# або змінною LCA_REMOTE_URL (напр. в .env: LCA_REMOTE_URL=http://host:8000/v1).
+REMOTE_BASE_URL = _os.environ.get("LCA_REMOTE_URL", "")
 REMOTE_MODEL = _os.environ.get("LCA_REMOTE_MODEL", "Qwen3.8-27B-Uncensored")
 REMOTE_KEY_ENV = "LLM_API_KEY"
 
