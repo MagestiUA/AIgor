@@ -31,8 +31,9 @@ LOCAL = Limits(chunk=32_000, inline=32_000, summary=32_000, digest=96_000, topic
                history_msgs=20, max_file=200 * 1024, file_chars=12_000)
 
 # ~256k токенів: найбільший одночасний внесок (вкладення inline ≈ 80k ток. + підсумок
-# ≈ 40k + історія) лишає запас під системні промпти й відповідь.
-REMOTE = Limits(chunk=150_000, inline=240_000, summary=120_000, digest=200_000,
+# ≈ 40k при 2.5 симв./ток.) ≈ 120k, тобто < 50% вікна — решта під історію, системні
+# промпти, тули й відповідь.
+REMOTE = Limits(chunk=120_000, inline=200_000, summary=100_000, digest=200_000,
                 topic=200_000, history_msgs=40, max_file=2 * 1024 * 1024,
                 file_chars=2 * 1024 * 1024)
 
