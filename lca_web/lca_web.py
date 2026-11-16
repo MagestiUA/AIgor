@@ -11,6 +11,7 @@ import re
 import threading
 import time
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 
 import reflex as rx
@@ -20,6 +21,7 @@ from agent import attachments as A
 from agent import backend as B
 from agent import config
 from agent import convo
+from agent import activity as act
 from agent import context_view as cv
 from agent.loopguard import (CONTEXT_FULL_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from agent import limits
@@ -85,6 +87,17 @@ def reset_client() -> None:
     global _CLIENT
     _CLIENT = None
 
+
+AGO_JS = """
+if (!window.__igorAgo) { window.__igorAgo = setInterval(() => {
+  document.querySelectorAll('.igor-ago').forEach(e => {
+    const t = Date.parse(e.dataset.ts || ''); if (!t) { e.textContent = ''; return; }
+    const s = Math.max(0, Math.round((Date.now() - t) / 1000));
+    e.textContent = s < 60 ? s + ' с тому' : Math.floor(s / 60) + ' хв ' + (s % 60) + ' с тому';
+    e.style.color = s > 60 ? '#e5a04b' : '';
+  });
+}, 1000); }
+"""
 
 SCROLL_SETUP_JS = """
 (() => {
@@ -162,6 +175,9 @@ class State(rx.State):
     stopping: bool = False                 # стоп запитано, чекаємо переривання
     context_summary: str = ""              # контекст-памʼять розмови (підсумок)
     compress_log: list[dict] = []          # історія стискань контексту цієї сесії
+    activity: list[dict[str, str]] = []    # жива стрічка: запити до моделі й виклики тулів (під катом)
+    activity_last: str = ""                # ISO-час останньої події (годинник «N с тому» на клієнті)
+    _act_seq: int = 0                      # лічильник id подій (backend-only)
     git_is_repo: bool = False              # робоча тека — git-репозиторій
     git_branch: str = ""
     git_add: int = 0
@@ -241,6 +257,20 @@ class State(rx.State):
         self._resolve_confirm(False)
 
     # ── Лічильник токенів (викликати лише всередині `async with self`) ─────────
+    def _act_start(self, kind: str, title: str, detail: str = "") -> int:
+        """Додати подію «виконується» у живу стрічку (викликати всередині `async with self`)."""
+        self._act_seq += 1
+        e = {"id": str(self._act_seq), "status": "run", "kind": kind, "title": title,
+             "detail": detail[:900], "t": time.strftime("%H:%M:%S")}
+        self.activity = [*self.activity, e][-80:]
+        self.activity_last = datetime.now(timezone.utc).isoformat()
+        return self._act_seq
+
+    def _act_done(self, seq: int, detail: str, ok: bool = True) -> None:
+        self.activity = [({**e, "status": "ok" if ok else "err", "detail": detail[:900]}
+                          if e["id"] == str(seq) else e) for e in self.activity]
+        self.activity_last = datetime.now(timezone.utc).isoformat()
+
     def _reset_tokens(self):
         self.tok_prompt = self.tok_out = self.tok_eval_ns = 0
         self.tok_tps = 0.0
@@ -442,6 +472,7 @@ class State(rx.State):
         self.queued_text = ""
         self.context_summary = ""
         self.compress_log = []
+        self.activity = []
         self.session_topics = []
         self.chat_project_id = ""
         self.attachments = []
@@ -517,6 +548,7 @@ class State(rx.State):
         self.has_pending = s.pending_plan is not None
         self.context_summary = s.context_summary
         self.compress_log = list(s.compressions)
+        self.activity = []
         self.session_topics = list(s.topics)
         self.attachments = []     # чіпи — стейджинг до відправки; вкладення сесії на диску
         self._load_question(s.pending_question)
@@ -743,7 +775,7 @@ class State(rx.State):
         # Тему застосовує next-themes сам (зберігає в localStorage між перезавантаженнями);
         # set_color_mode НЕ можна викликати з бекенд-хендлера — лише шрифт через DOM.
         # PASTE_SETUP_JS — одноразово вішає document-listener вставки файлів (Ctrl+V).
-        return [rx.call_script(self.ui_font_js), rx.call_script(PASTE_SETUP_JS)]
+        return [rx.call_script(self.ui_font_js), rx.call_script(PASTE_SETUP_JS), rx.call_script(AGO_JS)]
 
     def _persist_settings(self):
         from agent import settings as S
@@ -963,6 +995,17 @@ class State(rx.State):
                            attachments_dir=A.session_dir(self.current_id))
 
     async def _dispatch_tool(self, reg, name: str, args: dict, ctx: ToolContext) -> str:
+        """Виконати тул + показати подію в живій стрічці («що виконує і який результат»)."""
+        async with self:
+            aid = self._act_start("tool", name, act.summarize_args(name, args))
+        t0 = time.monotonic()
+        result = await self._dispatch_tool_inner(reg, name, args, ctx)
+        async with self:
+            self._act_done(aid, f"{time.monotonic() - t0:.1f}с · " + act.clip_result(result),
+                           ok=act.result_ok(result))
+        return result
+
+    async def _dispatch_tool_inner(self, reg, name: str, args: dict, ctx: ToolContext) -> str:
         """Виконати тул. run_shell, що потребує підтвердження (shell=ask, або smart+
         небезпечна), ставимо на ASYNC-паузу з діалогом (без блокування воркера); решта —
         у потоці. Схвалену команду виконуємо з shell=auto, щоб тул не питав удруге."""
@@ -1004,10 +1047,18 @@ class State(rx.State):
         for _ in range(max_iters):
             if stop_event is not None and stop_event.is_set():
                 final = "зупинено користувачем"; break
+            async with self:
+                aid = self._act_start("llm", "Запит до моделі", f"повідомлень у контексті: {len(messages)}")
+            t_llm = time.monotonic()
             msg = await asyncio.to_thread(
                 lambda: client.chat(messages, tools=reg.schema(), profile=config.EXECUTOR))
             if client.last_stats:
                 stats.append(dict(client.last_stats))
+            n_calls = len(msg.get("tool_calls") or [])
+            async with self:
+                ls = client.last_stats or {}
+                self._act_done(aid, f"{time.monotonic() - t_llm:.1f}с · ↑{ls.get('prompt', 0)} ↓{ls.get('out', 0)} токенів"
+                                    + (f" · викликів тулів: {n_calls}" if n_calls else " · текстова відповідь"))
             calls, recovered = recover_tool_calls(msg)
             if not calls:
                 content = (msg.get("content") or "").strip()
@@ -1177,7 +1228,13 @@ class State(rx.State):
             label = args.get("name") or args.get("query") or args.get("path") or name
             async with self:
                 self.status = f"{name}: {label}"[:60]
+            async with self:
+                aid = self._act_start("tool", name, act.summarize_args(name, args))
+            t_tool = time.monotonic()
             result = await asyncio.to_thread(lambda n=name, a=args: reg.dispatch(n, a, tctx))
+            async with self:
+                self._act_done(aid, f"{time.monotonic() - t_tool:.1f}с · " + act.clip_result(result),
+                               ok=act.result_ok(result))
             shown = result
             if digest_memory is not None and name == "read_attachment" and client is not None:
                 async with self:
@@ -1700,6 +1757,7 @@ class State(rx.State):
     async def _process_one_inner(self, text: str):
         async with self:
             self._reset_tokens()
+            self.activity = []                     # нова стрічка подій для цього запиту
             # Свіжа стоп-подія на кожен запит, щоб stop_generation і виконавець кроків
             # завжди працювали з одним і тим самим обʼєктом (а не None, захопленим зарано).
             _STOP_EVENTS[self.current_id] = threading.Event()
@@ -2616,11 +2674,54 @@ def streaming_bubble() -> rx.Component:
     )
 
 
+def activity_panel() -> rx.Component:
+    """Жива стрічка «Що робить Ігорь» під катом: кожен запит до моделі та виклик тула
+    (який скрипт/команда і який результат) + годинник «остання подія N с тому» —
+    видно, чи є рух, чи агент завис."""
+    return rx.cond(
+        State.activity.length() > 0,
+        rx.el.details(
+            rx.el.summary(
+                rx.hstack(
+                    rx.icon("activity", size=14),
+                    rx.text("Що робить Ігорь · подій: ", State.activity.length(), " · остання ",
+                            rx.el.span(data_ts=State.activity_last, class_name="igor-ago"),
+                            class_name="text-xs"),
+                    rx.cond(State.busy, rx.spinner(size="1")),
+                    class_name="items-center gap-2 text-gray-500 cursor-pointer",
+                ),
+            ),
+            rx.vstack(rx.foreach(State.activity, activity_row_full), gap="2",
+                      class_name="mt-2 max-h-96 overflow-y-auto w-full"),
+            class_name="w-full rounded-lg border border-white/10 px-3 py-2",
+        ),
+        rx.fragment(),
+    )
+
+
+def activity_row_full(r: dict) -> rx.Component:
+    """Рядок стрічки: статус, час, тул і його команда; нижче — результат (для тулів)."""
+    return rx.vstack(
+        rx.hstack(
+            rx.cond(r["status"] == "run", rx.spinner(size="1"),
+                    rx.cond(r["status"] == "ok", rx.text("✓", class_name="text-xs text-green-400"),
+                            rx.text("✗", class_name="text-xs text-red-400"))),
+            rx.text(r["t"], class_name="text-xs text-gray-600 font-mono shrink-0"),
+            rx.text(r["title"], class_name=rx.cond(r["kind"] == "tool", "text-xs text-sky-300 font-mono shrink-0",
+                                                   "text-xs text-gray-400 shrink-0")),
+            class_name="items-center gap-2 w-full",
+        ),
+        rx.text(r["detail"], class_name="text-xs text-gray-400 font-mono pl-5 whitespace-pre-wrap break-all"),
+        gap="0", class_name="w-full",
+    )
+
+
 def chat_view() -> rx.Component:
     return rx.vstack(
         rx.foreach(State.messages, message_bubble),
         rx.cond(State.streaming, streaming_bubble(), rx.fragment()),
         status_line(),
+        activity_panel(),
         rx.cond(State.has_pending, pending_bar(), rx.fragment()),
         rx.cond(State.has_question, question_bar(), rx.fragment()),
         id="chat-scroll",
@@ -2804,5 +2905,5 @@ def index() -> rx.Component:
 app = rx.App(
     stylesheets=["https://fonts.googleapis.com/css2?family=Newsreader:ital@0;1&display=swap"],
 )
-app.add_page(index, title="Ігорь!",
+app.add_page(index, title=f"Ігорь! · {logs.app_version()}",
              on_load=[State.load_sessions, State.load_settings])

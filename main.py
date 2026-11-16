@@ -193,8 +193,9 @@ def _open_window(url: str, log) -> None:
     geo = _load_geometry()
     # text_select=False — дефолт pywebview, забороняє виділення/копіювання
     # тексту в усьому вікні (живий кейс: текст у чаті неможливо було виділити).
+    from agent import logs as _logs
     window = webview.create_window(
-        "Ігорь!", url, width=geo["width"], height=geo["height"],
+        f"Ігорь! · {_logs.app_version()}", url, width=geo["width"], height=geo["height"],
         x=geo.get("x"), y=geo.get("y"), min_size=(800, 600), text_select=True,
     )
     # closing — синхронна подія (блокує закриття до завершення хендлера),
