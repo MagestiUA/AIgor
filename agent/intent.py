@@ -10,6 +10,7 @@ import json
 
 from . import config
 from .llm import OllamaClient
+from .orchestration import wants_discussion
 
 MODES = {"edit", "answer", "shell", "plan"}
 
@@ -20,6 +21,8 @@ SYSTEM = (
     "changes yet (e.g. 'let's plan', 'how would you approach', 'don't code yet').\n"
     "- 'answer': explain, analyze, or ask about the code/project; NO changes made.\n"
     "- 'shell': run a command (tests, list files, build, lint).\n"
+    "Questions about feasibility or explanations ('can we add X?', 'чи можна додати X?', "
+    "'how would this work?') are 'answer' — the user is discussing, NOT asking to change anything.\n"
     "If the user message is a short confirmation (e.g. 'do it', 'роби') right after the "
     "assistant proposed changes, classify it as 'edit'.\n"
     'Reply ONLY as JSON: {"mode": "edit|plan|answer|shell"}.'
@@ -35,6 +38,8 @@ SCHEMA = {
 def classify_intent(task: str, client: OllamaClient | None = None, context: str = "") -> str:
     """context — що було перед повідомленням (остання відповідь асистента): без нього коротке
     «роби» класифікується навмання (фідбек розробників)."""
+    if wants_discussion(task):                    # питання про можливість/«просто питання» — обговорення, без виклику моделі
+        return "answer"
     client = client or OllamaClient()
     user = (context + "\n\nПовідомлення користувача:\n" if context else "") + task
     msg = client.chat(

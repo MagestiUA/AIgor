@@ -1878,6 +1878,7 @@ class State(rx.State):
             summary = self.context_summary
             att_note = self._attachments_note()     # шляхи прикріплених файлів (модель читає сама)
             last_ai = orch.last_assistant_text(self.messages)      # ПОВНА попередня відповідь (не підсумок)
+            dialogue = orch.recent_dialogue(self.messages)         # останні репліки діалогу (не лише підсумок)
             answering = self.has_question
             if answering:
                 self.has_question = False
@@ -1907,7 +1908,7 @@ class State(rx.State):
                 async with self:
                     self.status = "Аналізую код…"
                 ctx = await asyncio.to_thread(lambda: build_context(root, refs, text))
-                so = await self._answer_reply(text, convo.as_context(summary) + ctx,
+                so = await self._answer_reply(text, convo.as_context(summary) + dialogue + ctx,
                                               att_note, root, client)
             elif mode == "shell":
                 async with self:
@@ -1925,7 +1926,7 @@ class State(rx.State):
                 doc = await asyncio.to_thread(lambda: load_project_doc(root))
                 struct = await asyncio.to_thread(lambda: scan_structure(root))
                 su2, so = await self._deliberate_flow(
-                    task_text, convo.as_context(summary) + struct, doc, [], root, plan_first, client)
+                    task_text, convo.as_context(summary) + dialogue + struct, doc, [], root, plan_first, client)
                 su = su2 if not approved else su
 
         if (so or "").strip():

@@ -33,6 +33,14 @@ def main() -> None:
     classify_intent("роби", Spy('{"mode": "edit"}'))
     assert Spy.seen == "роби"                      # без контексту — як раніше
 
+    # питання про можливість / «просто питання» -> answer БЕЗ виклику моделі; ввічливе прохання — іде в модель
+    class Boom(Stub):
+        def chat(self, *a, **k):
+            raise AssertionError("модель не мала викликатись")
+
+    assert classify_intent("чи можна додати хелс-чек сервіс для кластера?", Boom("")) == "answer"
+    assert classify_intent("це було просто питання, без вимоги писати код", Boom("")) == "answer"
+    assert classify_intent("чи можеш додати тести?", Stub('{"mode": "edit"}')) == "edit"
     print("OK: класифікація наміру edit/plan/answer/shell + дефолт answer")
 
 

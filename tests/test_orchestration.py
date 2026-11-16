@@ -58,6 +58,31 @@ def main() -> None:
     assert o.pick_step(tb, ["bad.py"]) == 3                     # останній, що чіпав файл
     assert o.pick_step(tb, ["інше.py"]) == 3                    # fallback — останній крок зі змінами
     assert o.pick_step({}, ["a.py"]) is None and o.pick_step({}, ["a.py"], fallback=2) == 2
+    # фідбек b_0.0.7: «ок, тоді додай» має бути згодою; «додай тести» — новою задачею
+    assert o.is_confirmation("ок, тоді додай") and o.is_confirmation("додай") and o.is_confirmation("так, додаємо")
+    assert not o.is_confirmation("додай тести") and not o.is_confirmation("ні, не додавай")
+    assert "РЕКОМЕНДОВАНИЙ" in o.expand_confirmation("ок, тоді додай", "Варіант 3 рекомендовано")
+
+    # питання про можливість — обговорення, а ввічливе прохання — завдання
+    assert o.looks_like_question("чи можна додати якийсь хелс-чек сервіс, аби при роботі в кластері... чи десь завис?")
+    assert o.looks_like_question("Як це працює?") and o.looks_like_question("Is it possible to add logging?")
+    assert not o.looks_like_question("чи можеш додати тести?") and not o.looks_like_question("Can you add tests?")
+    assert not o.looks_like_question("додай тести?") and not o.looks_like_question("чи можна додати")   # без «?»
+    assert o.wants_discussion("це було просто питання чи можна це зробити?")
+    assert o.wants_discussion("просто питання без вимоги відразу писати код") and o.wants_discussion("Не пиши код поки")
+    assert not o.wants_discussion("додай хелс-чек") and not o.wants_discussion("роби")
+
+    # недавній діалог: без поточного повідомлення, без службових кроків/нотаток, з обрізанням
+    dm = [{"role": "user", "content": "q1", "kind": "text"},
+          {"role": "assistant", "content": "a1 " + "x" * 3000, "kind": "answer"},
+          {"role": "assistant", "content": "крок", "kind": "step"},
+          {"role": "assistant", "content": "нотатка", "kind": "note"},
+          {"role": "user", "content": "q2", "kind": "text"}]
+    rd = o.recent_dialogue(dm, per=100)
+    assert "Користувач: q1" in rd and "Асистент: a1" in rd and "…" in rd
+    assert "q2" not in rd and "крок" not in rd and "нотатка" not in rd
+    assert o.recent_dialogue([{"role": "user", "content": "лише поточне"}]) == ""
+    assert o.recent_dialogue(dm * 5, n=2).count("Користувач:") + o.recent_dialogue(dm * 5, n=2).count("Асистент:") == 2
     print("OK: orchestration — згода/розгортання, великий план, змінені файли, синтаксис, вибір кроку")
 
 

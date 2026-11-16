@@ -23,6 +23,7 @@ _CONFIRM = {
     "добро", "виконуй", "виконай", "приступай", "починай", "розпочинай", "реалізуй", "погоджуюсь",
     "згоден", "згодна", "підходить", "супер", "+", "yes", "ok", "okay", "go", "sure", "proceed",
     "do", "it", "ahead", "implement",
+    "додай", "додавай", "впроваджуй", "реалізовуй", "пиши", "кодь", "додаємо", "реалізуємо",
 }
 _FILLERS = {"будь", "ласка", "будьласка", "це", "його", "її", "все", "тоді", "і", "та", "ну", "пліз",
             "please", "then", "that", "now", "зараз", "вже", "оце", "цей", "це,"}
@@ -58,6 +59,8 @@ def expand_confirmation(text: str, last_assistant: str) -> str | None:
     if not last_assistant or not is_confirmation(text):
         return None
     return (f"Виконай те, що ти щойно запропонував (користувач підтвердив: «{text.strip()}»). "
+            "Якщо пропозиція містила кілька варіантів — обирай РЕКОМЕНДОВАНИЙ (позначений як "
+            "рекомендований/найкращий) і НЕ перепитуй, який саме. "
             f"Твоя попередня відповідь, яку схвалено:\n\n{last_assistant}")
 
 
@@ -112,3 +115,56 @@ def pick_step(touched_by_step: dict[int, list[str]], bad_paths: list[str], fallb
     if hits:
         return max(hits)
     return fallback if fallback is not None else (max(touched_by_step) if touched_by_step else None)
+
+
+# ── питання vs завдання ─────────────────────────────────────────────────────
+# Фідбек: «чи можна додати хелс-чек? ... просто питання без вимоги відразу писати код» —
+# класифікатор видав «план». Питання про можливість/пояснення — це обговорення, не завдання.
+_Q_START = {"чи", "як", "що", "де", "коли", "чому", "навіщо", "скільки", "який", "яка", "яке", "які",
+            "хто", "кому", "is", "can", "how", "what", "why", "where", "when", "should", "does", "do", "are"}
+# «чи можеш/зможеш додати…», «can you…» — ввічливе ПРОХАННЯ зробити, не питання
+_POLITE_REQUEST = ("чи можеш", "чи зможеш", "чи міг би", "чи могла б", "чи могли б", "можеш ", "зможеш ",
+                   "can you", "could you", "would you", "will you")
+
+
+def looks_like_question(text: str) -> bool:
+    t = (text or "").strip()
+    if not t.endswith("?"):
+        return False
+    low = t.lower()
+    if any(low.startswith(p) for p in _POLITE_REQUEST):
+        return False
+    words = re.findall(r"[\w']+", low)
+    return bool(words) and words[0] in _Q_START
+
+
+# ── недавній діалог для режиму «аналіз» і планувальника ─────────────────────
+def recent_dialogue(messages: list[dict], n: int = 6, per: int = 2500) -> str:
+    """Кілька останніх реплік (користувач/асистент: відповіді, плани, тексти) ПЕРЕД поточним
+    повідомленням. Живий кейс: без цього режим «аналіз» не бачив попереднього плану й питання
+    і відповів не на те (плутав із попередньою задачею), а ще перечитував усі файли."""
+    msgs = list(messages)
+    while msgs and msgs[-1].get("role") == "user":
+        msgs.pop()
+    keep = [m for m in msgs if m.get("role") in ("user", "assistant")
+            and m.get("kind", "text") in ("text", "answer", "plan") and (m.get("content") or "").strip()][-n:]
+    if not keep:
+        return ""
+    lines = []
+    for m in keep:
+        who = "Користувач" if m["role"] == "user" else "Асистент"
+        c = m["content"].strip()
+        lines.append(f"{who}: {c if len(c) <= per else c[:per] + '…'}")
+    return "Недавня розмова (для розуміння поточного повідомлення):\n" + "\n\n".join(lines) + "\n\n"
+
+
+# Прямі вказівки «лише обговорюємо» (фідбек: «це було просто питання … без вимоги відразу писати код»)
+_DISCUSS_MARKERS = ("просто питання", "лише питання", "тільки питання", "без вимоги", "не пиши код",
+                    "поки не пиши", "не треба код", "без коду", "лише обговор", "тільки обговор",
+                    "just a question", "don't code", "do not code", "no code yet", "just asking")
+
+
+def wants_discussion(text: str) -> bool:
+    """Питання про можливість/пояснення АБО явне «просто обговорюємо, не пиши код»."""
+    low = (text or "").lower()
+    return looks_like_question(text) or any(m in low for m in _DISCUSS_MARKERS)
