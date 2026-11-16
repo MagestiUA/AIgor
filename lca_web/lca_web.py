@@ -17,6 +17,7 @@ import reflex as rx
 from reflex_base.style import set_color_mode
 
 from agent import attachments as A
+from agent import backend as B
 from agent import config
 from agent import convo
 from agent import context_view as cv
@@ -35,6 +36,7 @@ from agent.llm import OllamaClient
 from agent.memory import render_for_planner
 from agent.planner import deliberate
 from agent.project import load_project_doc, scan_structure
+from agent.project_info import git_info
 from agent.toolkit import ATTACHMENT_CHUNK_SIZE, ToolContext, default_registry
 
 CHAT_SYSTEM = (
@@ -159,7 +161,12 @@ class State(rx.State):
     stopping: bool = False                 # стоп запитано, чекаємо переривання
     context_summary: str = ""              # контекст-памʼять розмови (підсумок)
     compress_log: list[dict] = []          # історія стискань контексту цієї сесії
-    ctx_open: bool = False                 # бічна панель «Контекст»
+    git_is_repo: bool = False              # робоча тека — git-репозиторій
+    git_branch: str = ""
+    git_add: int = 0
+    git_del: int = 0
+    git_files: list[dict[str, str]] = []   # зміни: [{path, delta}]
+    git_more: int = 0
     session_topics: list[str] = []         # теми (chat), що траплялись у цій сесії
     # Проекти chat-режиму (аналог Claude/ChatGPT Projects) — лише для mode="chat".
     projects: list[dict] = []
@@ -258,9 +265,68 @@ class State(rx.State):
         model = f"{self.tok_model} · " if self.tok_model else ""
         return f"{model}↑{ctx} ctx · ↓{self.tok_out} out · {self.tok_tps} tok/s"
 
-    @rx.event
-    def toggle_ctx(self):
-        self.ctx_open = not self.ctx_open
+    def _apply_git(self, info: dict) -> None:
+        self.git_is_repo = bool(info["is_repo"])
+        self.git_branch = info["branch"]
+        self.git_add, self.git_del, self.git_more = info["add"], info["del"], info["more"]
+        self.git_files = [{"path": f["path"],
+                           "delta": "новий" if f.get("new") else f"+{f['add']} −{f['del']}"}
+                          for f in info["files"]]
+
+    async def _refresh_git_async(self) -> None:
+        """Оновити гілку/зміни git після завершення запиту (subprocess поза lock-ом стану)."""
+        async with self:
+            root, code = self.project_root, self.mode == "code"
+        if not (code and root):
+            return
+        info = await asyncio.to_thread(git_info, root)
+        async with self:
+            self._apply_git(info)
+
+    @rx.var
+    def env_rows(self) -> list[dict[str, str]]:
+        """Секція «Середовище»: де працює модель, режим, дозволи, гілка."""
+        from urllib.parse import urlparse
+        _ = (self.llm_backend, self.llm_host, self.llm_port, self.llm_model)   # перерахунок після збереження
+        eff = B.resolve()
+        rows: list[dict[str, str]] = []
+        if eff["backend"] == "openai":
+            u = urlparse(eff["base_url"])
+            rows.append({"label": "Сервер", "value": f"{u.hostname}:{u.port}" if u.port else str(u.hostname)})
+            rows.append({"label": "Модель", "value": eff["model"] or "авто"})
+        else:
+            rows.append({"label": "Бекенд", "value": "локально (Ollama)"})
+            rows.append({"label": "Модель", "value": config.MODEL})
+        rows.append({"label": "Режим", "value": "Чат" if self.mode == "chat" else "Код"})
+        if self.mode == "code":
+            rows.append({"label": "Правки / консоль", "value": f"{self.edits} / {self.shell}"})
+            if self.git_branch:
+                rows.append({"label": "Гілка git", "value": self.git_branch})
+        return rows
+
+    @rx.var
+    def folder_rows(self) -> list[dict[str, str]]:
+        """Секція «Теки та файли»: з чим працює відкритий чат."""
+        rows: list[dict[str, str]] = []
+        if self.mode == "code" and self.project_root:
+            rows.append({"name": Path(self.project_root).name, "path": self.project_root, "tag": "проєкт"})
+        if self.mode == "chat" and self.chat_project_id:
+            pr = CP.load_project(self.chat_project_id)
+            if pr:
+                rows.append({"name": pr.name, "path": "проєкт чату (інструкції)", "tag": "проєкт"})
+        for r in self.references:
+            rows.append({"name": Path(r).name, "path": r, "tag": "джерело"})
+        _ = self.attachments                                  # перерахунок при зміні вкладень
+        if self.current_id:
+            n = len(A.list_saved(self.current_id))
+            if n:
+                rows.append({"name": f"Вкладення ({n})", "path": str(A.session_dir(self.current_id)),
+                             "tag": "файли чату"})
+        return rows
+
+    @rx.var
+    def git_summary(self) -> str:
+        return f"+{self.git_add} −{self.git_del}"
 
     @rx.var
     def ctx_report(self) -> str:
@@ -313,10 +379,6 @@ class State(rx.State):
     @rx.var
     def ctx_pct(self) -> int:
         return int(json.loads(self.ctx_report)["used_pct"])
-
-    @rx.var
-    def ctx_chip(self) -> str:
-        return f"Контекст {self.ctx_pct}%"
 
     @rx.var
     def ctx_total(self) -> str:
@@ -440,6 +502,8 @@ class State(rx.State):
         self.mode = s.kind
         self.title = s.title
         self.project_root = s.project_root
+        self._apply_git(git_info(s.project_root) if s.kind == "code" else
+                        {"is_repo": False, "branch": "", "add": 0, "del": 0, "files": [], "more": 0})
         self.chat_project_id = s.project_id
         self.current_project_id = s.project_id    # сайдбар-фільтр узгоджений із чатом
         self.edits = s.permissions.get("edits", "ask")
@@ -797,6 +861,7 @@ class State(rx.State):
         self.project_root = self.folder_input.strip()
         if self.project_root and self.title in ("", "Новий чат"):
             self.title = Path(self.project_root).name
+        self._apply_git(git_info(self.project_root))
         self._save_current()
 
     @rx.event
@@ -1565,6 +1630,7 @@ class State(rx.State):
         """Після завершення запиту: якщо в черзі є повідомлення — виконати його (busy
         тримається), інакше зняти busy. Перевірка + зняття — атомарні, без втрати черги."""
         while True:
+            await self._refresh_git_async()                  # зміни/гілка після завершеного запиту
             async with self:
                 if self.queued_text:
                     nxt = self.queued_text
@@ -2352,13 +2418,7 @@ def token_bar() -> rx.Component:
         ),
         rx.fragment(),
     )
-    chip = rx.hstack(
-        rx.icon("gauge", size=12),
-        rx.text(State.ctx_chip, class_name="text-xs"),
-        on_click=State.toggle_ctx, title="Що займає контекст",
-        class_name="items-center gap-1 text-gray-500 hover:text-gray-200 cursor-pointer",
-    )
-    return rx.hstack(left, rx.spacer(), chip, class_name="items-center w-full px-1 mb-1")
+    return rx.hstack(left, class_name="items-center w-full px-1 mb-1")
 
 
 def input_box() -> rx.Component:
@@ -2567,47 +2627,94 @@ def ctx_row(r: dict) -> rx.Component:
     )
 
 
-def context_panel() -> rx.Component:
-    """Бічна панель «Контекст» (як у Claude Code): що займає вікно моделі + дані про
-    стиснення біля пунктів, що можуть стискатись."""
-    return rx.cond(
-        State.ctx_open,
+def _section(title: str, *children, **kw) -> rx.Component:
+    return rx.vstack(
+        rx.text(title, class_name="text-xs text-gray-500 uppercase tracking-wide"),
+        *children, gap="2", class_name="w-full py-3 border-b border-white/10", **kw)
+
+
+def _kv(r: dict) -> rx.Component:
+    return rx.hstack(
+        rx.text(r["label"], class_name="text-sm text-gray-500 w-28 shrink-0"),
+        rx.text(r["value"], class_name="text-sm text-gray-200 break-all"),
+        class_name="items-start gap-2 w-full")
+
+
+def _folder(r: dict) -> rx.Component:
+    return rx.hstack(
+        rx.icon("folder", size=14, class_name="text-gray-500 shrink-0 mt-0.5"),
         rx.vstack(
+            rx.text(r["name"], class_name="text-sm text-gray-200 break-all"),
+            rx.text(r["path"], class_name="text-xs text-gray-600 break-all"),
+            gap="0", class_name="grow min-w-0"),
+        rx.text(r["tag"], class_name="text-xs text-gray-500 shrink-0"),
+        class_name="items-start gap-2 w-full")
+
+
+def _change(r: dict) -> rx.Component:
+    return rx.hstack(
+        rx.text(r["path"], class_name="text-xs text-gray-300 font-mono break-all grow min-w-0"),
+        rx.text(r["delta"], class_name="text-xs text-gray-500 font-mono shrink-0"),
+        class_name="items-start gap-2 w-full")
+
+
+def context_panel() -> rx.Component:
+    """Постійна права панель (як у Claude Code): середовище, контекст (що займає вікно
+    моделі + дані про стиснення), теки/файли чату, зміни в git. Ховається на вузьких вікнах."""
+    context = rx.vstack(
+        rx.hstack(
+            rx.text(State.ctx_pct, "% використано", class_name="text-sm text-gray-200"),
+            rx.spacer(),
+            rx.text(State.ctx_total, class_name="text-sm text-gray-400 font-mono"),
+            class_name="w-full items-center",
+        ),
+        rx.hstack(
+            rx.foreach(State.ctx_segments,
+                       lambda s: rx.box(style={"width": s["width"], "backgroundColor": s["color"]},
+                                        class_name="h-full")),
+            class_name="w-full h-2 rounded-full overflow-hidden gap-px",
+            style={"backgroundColor": "#333"},
+        ),
+        rx.vstack(rx.foreach(State.ctx_rows, ctx_row), gap="3", class_name="w-full mt-1"),
+        rx.hstack(
+            rx.box(class_name="w-3 h-3 rounded-sm shrink-0", style={"backgroundColor": "#4b4b4b"}),
+            rx.text("Вільно", class_name="text-sm text-gray-400 grow"),
+            rx.text(State.ctx_free, class_name="text-sm text-gray-400 font-mono"),
+            class_name="items-center gap-2 w-full",
+        ),
+        rx.cond(State.tok_out > 0,
+                rx.text("Останній запит: ", State.tokens_label, class_name="text-xs text-gray-500 font-mono")),
+        rx.text("Токени — оцінка за символами. Підсумок розмови, дайджести файлів і нотатки тем "
+                "стискаються автоматично при перевищенні порогу; про кожне стиснення Ігорь пише "
+                "в чаті й у лозі.", class_name="text-xs text-gray-600"),
+        gap="3", class_name="w-full")
+    changes = rx.cond(
+        State.git_is_repo & (State.mode == "code"),
+        _section(
+            "Зміни",
             rx.hstack(
-                rx.heading("Контекст", size="4"),
-                rx.spacer(),
-                rx.icon_button(rx.icon("x", size=16), variant="ghost", size="1", on_click=State.toggle_ctx),
-                class_name="w-full items-center",
-            ),
-            rx.hstack(
-                rx.text(State.ctx_pct, "% використано", class_name="text-sm text-gray-200"),
-                rx.spacer(),
-                rx.text(State.ctx_total, class_name="text-sm text-gray-400 font-mono"),
-                class_name="w-full items-center",
-            ),
-            rx.hstack(
-                rx.foreach(State.ctx_segments,
-                           lambda s: rx.box(style={"width": s["width"], "backgroundColor": s["color"]},
-                                            class_name="h-full")),
-                class_name="w-full h-2 rounded-full overflow-hidden gap-px",
-                style={"backgroundColor": "#333"},
-            ),
-            rx.vstack(rx.foreach(State.ctx_rows, ctx_row), gap="3", class_name="w-full mt-2"),
-            rx.hstack(
-                rx.box(class_name="w-3 h-3 rounded-sm shrink-0", style={"backgroundColor": "#4b4b4b"}),
-                rx.text("Вільно", class_name="text-sm text-gray-400 grow"),
-                rx.text(State.ctx_free, class_name="text-sm text-gray-400 font-mono"),
-                class_name="items-center gap-2 w-full mt-1",
-            ),
-            rx.text("Токени — оцінка за кількістю символів. Підсумок розмови, дайджести файлів і "
-                    "нотатки тем стискаються автоматично при перевищенні порогу; про кожне "
-                    "стиснення Ігорь пише в чаті й у лозі.",
-                    class_name="text-xs text-gray-600 mt-3"),
-            gap="3",
-            class_name="w-[340px] shrink-0 h-full overflow-y-auto p-4 border-l border-white/10",
-            style={"backgroundColor": PANEL},
+                rx.text(State.git_summary, class_name="text-sm font-mono text-green-400"),
+                rx.text("у ", State.git_branch, class_name="text-xs text-gray-500"),
+                class_name="items-center gap-2"),
+            rx.foreach(State.git_files, _change),
+            rx.cond(State.git_more > 0,
+                    rx.text("… ще ", State.git_more, class_name="text-xs text-gray-600")),
         ),
         rx.fragment(),
+    )
+    return rx.box(
+        rx.vstack(
+            rx.heading("Ігорь", size="3", class_name="mb-1"),
+            _section("Середовище", rx.foreach(State.env_rows, _kv)),
+            _section("Контекст", context),
+            rx.cond(State.folder_rows.length() > 0,
+                    _section("Теки та файли", rx.foreach(State.folder_rows, _folder)),
+                    rx.fragment()),
+            changes,
+            gap="0", class_name="w-full",
+        ),
+        class_name="hidden lg:block w-[320px] shrink-0 h-full overflow-y-auto p-4 border-l border-white/10",
+        style={"backgroundColor": PANEL},
     )
 
 

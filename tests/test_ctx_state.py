@@ -28,7 +28,10 @@ def main() -> None:
         assert "120 000 → 61 000" in rows["Підсумок розмови"]["compress"]
         assert "стиснень: 1" in rows["Підсумок розмови"]["compress"]
         assert rows["Повідомлення"]["note"] == "у вікні 2 з 2"
-        assert s.ctx_chip.startswith("Контекст ") and s.ctx_chip.endswith("%")
+        assert s.ctx_total.startswith("≈") and "/" in s.ctx_total and isinstance(s.ctx_pct, int)
+        # секції «Середовище» / «Теки та файли» (чат без проєкту й вкладень: теки порожні)
+        assert {r["label"] for r in s.env_rows} >= {"Бекенд", "Модель", "Режим"} or \n               {r["label"] for r in s.env_rows} >= {"Сервер", "Модель", "Режим"}
+        assert s.folder_rows == []
         assert all(set(r) == {"label", "tokens_label", "pct_label", "color", "note", "compress"} for r in s.ctx_rows)
         assert s.ctx_segments and all(x["width"].endswith("%") for x in s.ctx_segments)
         # код-режим: інший системний промпт і повний набір інструментів
