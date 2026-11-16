@@ -17,7 +17,7 @@ import time as _time
 from . import limits
 from . import logs
 from . import tools as T
-from .executor import apply_edit, create_from_source, run_edit
+from .executor import apply_edit, create_from_source, run_edit, run_patch
 from .project import scan_structure
 
 
@@ -280,7 +280,7 @@ def h_edit_file(args, ctx):
     p = _resolve(ctx, args.get("path", ""))
     if not p.is_file():
         return f"файл не знайдено: {args.get('path')}"
-    res = run_edit(p, args.get("instruction", ""), ctx.client, False)
+    res = run_patch(p, args.get("instruction", ""), ctx.client, False)
     return _apply_or_reject(res, p, ctx, "застосовано до")
 
 
@@ -344,8 +344,9 @@ def default_registry() -> ToolRegistry:
                     {"command": {"type": "string", "description": "команда для виконання"}},
                     ["command"], h_run_shell))
     r.register(Tool("edit_file",
-                    "Відрефакторити/змінити наявний .py файл за інструкцією "
-                    "(великі дані-літерали зберігаються автоматично).",
+                    "Змінити наявний файл за інструкцією: модель вносить ТОЧКОВІ правки (лише змінені "
+                    "фрагменти), решта файлу не чіпається; великі дані-літерали зберігаються автоматично. "
+                    "У instruction чітко вкажи ЩО й ДЕ (функція/клас/рядок) змінити.",
                     {"path": {"type": "string"}, "instruction": {"type": "string"}},
                     ["path", "instruction"], h_edit_file))
     r.register(Tool("create_from_source",

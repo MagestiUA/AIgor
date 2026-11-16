@@ -10,7 +10,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import config, tools
+from . import config, patching, tools
 from .literals import restore_code, strip_code
 from .llm import OllamaClient
 
@@ -79,6 +79,8 @@ def run_edit(path: str | Path, instruction: str,
         if not ok2:
             return EditResult(False, None, "", f"після restore невалідно: {err2}", None)
 
+    if original.endswith("\n") and not final.endswith("\n"):     # _extract_code обрізає кінцевий перенос
+        final += "\n"
     final, _note = tools.match_style(original, final, str(Path(path).name))
     diff = tools.unified_diff(original, final, str(Path(path).name))
 
@@ -87,6 +89,90 @@ def run_edit(path: str | Path, instruction: str,
         backup = tools.backup_file(path)
         tools.write_file(path, final)
 
+    return EditResult(True, final, diff, "", backup)
+
+
+PATCH_SYSTEM = (
+    "You are a precise code editor. You receive the FULL content of ONE file and an instruction. "
+    "Do NOT return the whole file. Return ONLY the changes, as one or more SEARCH/REPLACE blocks:\n"
+    "<<<<<<< SEARCH\n(existing lines, copied exactly)\n=======\n(new lines)\n>>>>>>> REPLACE\n"
+    "Rules:\n"
+    "- SEARCH must be WHOLE existing lines copied character for character (keep the indentation) and must "
+    "occur exactly once in the file; add 1-3 neighbouring lines of context if needed to make it unique.\n"
+    "- Keep blocks small: change only what the instruction requires. Several blocks are allowed.\n"
+    "- To insert code: put an anchor line in SEARCH and repeat it in REPLACE together with the new lines.\n"
+    "- To delete lines: leave the REPLACE part empty. To append to the end of the file: leave SEARCH empty.\n"
+    "- Match the file's indentation style (tabs or spaces) exactly.\n"
+    "- Tokens like __LIT_0__ are placeholders for large data that was removed; never touch them.\n"
+    "Output nothing except the blocks (no explanations)."
+)
+WHOLE_FILE_MAX = 12_000        # символів: до цього розміру при невдачі патчів можна переписати файл цілком
+PATCH_ROUNDS = 2               # перша спроба + одна повторна з поясненням, що не збіглось
+
+
+def run_patch(path: str | Path, instruction: str,
+              client: OllamaClient | None = None, write: bool = False,
+              project_doc: str | None = None) -> EditResult:
+    """Точкова правка: модель повертає лише змінені фрагменти (SEARCH/REPLACE), ми застосовуємо їх самі.
+    Файл у 59k символів — це десятки токенів відповіді замість ~17k (див. agent/patching.py).
+    Нічого не записується, поки всі блоки не застосувалися й результат не пройшов перевірки."""
+    client = client or OllamaClient()
+    original = tools.read_file(path)
+    body = original.replace("\r\n", "\n")
+    py = _is_python(path)
+    stripped, mapping = strip_code(body) if py else (body, {})
+    style = tools.detect_indent(body)
+    preamble = f"Project context:\n{project_doc}\n\n" if project_doc else ""
+    messages = [
+        {"role": "system", "content": PATCH_SYSTEM},
+        {"role": "user",
+         "content": f"{preamble}Instruction:\n{instruction}\n\n"
+                    f"File `{path}`:\n```{_fence_lang(path)}\n{stripped}\n```"},
+    ]
+    current, failed = stripped, [(0, "модель не відповіла")]
+    for rnd in range(PATCH_ROUNDS):
+        msg = client.chat(messages, profile=config.EXECUTOR)
+        reply = msg.get("content") or ""
+        blocks = patching.parse_blocks(reply)
+        if not blocks:
+            failed = [(0, "відповідь не містить жодного блоку SEARCH/REPLACE")]
+        else:
+            current, failed = patching.apply_blocks(current, blocks, style)
+        if not failed or rnd == PATCH_ROUNDS - 1:
+            break
+        why = "\n".join(f"- блок {n}: {w}" if n else f"- {w}" for n, w in failed)
+        messages += [
+            {"role": "assistant", "content": reply},
+            {"role": "user", "content": "Не всі блоки застосовано:\n" + why +
+             "\nУспішні блоки вже застосовано — НЕ повторюй їх. Надішли ЛИШЕ виправлені блоки для невдалих; "
+             "SEARCH має точно відповідати поточному тексту файлу."},
+        ]
+
+    if failed:
+        if len(stripped) <= WHOLE_FILE_MAX:                  # малий файл: дешевше переписати цілком
+            return run_edit(path, instruction, client, write, project_doc)
+        reasons = "; ".join(f"блок {n}: {w.splitlines()[0]}" if n else w for n, w in failed)
+        return EditResult(False, None, "", "не вдалося застосувати правку точково (" + reasons +
+                          "). Файл не змінено — уточни інструкцію або вкажи рядки/функцію точніше.", None)
+    if current == stripped:
+        return EditResult(False, None, "", "правка нічого не змінила (блоки збіглись із поточним текстом)", None)
+
+    if py:
+        ok, err = tools.validate_python(current)
+        if not ok:
+            return EditResult(False, None, "", f"після правки синтаксична помилка: {err}", None)
+    final = restore_code(current, mapping)
+    if py:
+        ok2, err2 = tools.validate_python(final)
+        if not ok2:
+            return EditResult(False, None, "", f"після restore невалідно: {err2}", None)
+
+    final, _note = tools.match_style(original, final, str(Path(path).name))
+    diff = tools.unified_diff(original, final, str(Path(path).name))
+    backup = None
+    if write:
+        backup = tools.backup_file(path)
+        tools.write_file(path, final)
     return EditResult(True, final, diff, "", backup)
 
 
