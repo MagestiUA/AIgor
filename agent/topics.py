@@ -25,7 +25,7 @@ from pathlib import Path
 
 from . import config
 from . import limits
-from .convo import _is_empty_echo, _strip_echoed_label
+from .convo import _is_empty_echo, _strip_echoed_label, notify_compress
 from .llm import OllamaClient
 
 TOPICS_ROOT = Path(__file__).resolve().parent.parent / ".chat_topics"
@@ -109,7 +109,8 @@ _MERGE_SYSTEM = (
 
 def update_topic_note(prev: str, user_text: str, outcome: str,
                       client: OllamaClient | None = None,
-                      budget: int | None = None, profile: dict = config.EXECUTOR) -> str:
+                      budget: int | None = None, profile: dict = config.EXECUTOR,
+                      on_compress=None) -> str:
     """Злити новий хід розмови в нотатку теми. Якщо вийшли за бюджет — ще один
     прохід тим самим промптом над самою нотаткою (природно стискає, бо
     зливає-і-стискає за дизайном). profile: chat-режим передає CHAT_EXECUTOR (gemma)."""
@@ -125,6 +126,7 @@ def update_topic_note(prev: str, user_text: str, outcome: str,
     if _is_empty_echo(out):
         out = prev
     if len(out) > budget:
+        before = len(out)
         msg2 = client.chat(
             [{"role": "system", "content": _MERGE_SYSTEM},
              {"role": "user", "content": f"Поточна нотатка (СТИСНИ, забагато):\n{out}\n\n"
@@ -134,6 +136,7 @@ def update_topic_note(prev: str, user_text: str, outcome: str,
         out2 = _strip_echoed_label((msg2.get("content") or "").strip(), "Поточна нотатка",
                                    "Updated note", "Note")
         out = out if _is_empty_echo(out2) else out2
+        notify_compress(on_compress, "нотатка теми", before, len(out))
     return out
 
 

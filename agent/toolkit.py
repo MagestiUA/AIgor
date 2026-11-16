@@ -201,9 +201,12 @@ def h_write_file(args, ctx):
         return f"помилка: '{rel}' — це тека, а не файл"
     content = args.get("content", "")
     p.parent.mkdir(parents=True, exist_ok=True)
+    note = ""
+    if p.is_file():                         # перезапис: зберегти стиль відступів/кінців рядків
+        content, note = T.match_style(T.read_file(p), content, p.name)
     T.backup_file(p)
     T.write_file(p, content)
-    return f"записано {p.name} ({len(content)} символів)"
+    return f"записано {p.name} ({len(content)} символів)" + (f" [{note}]" if note else "")
 
 
 def h_run_shell(args, ctx):

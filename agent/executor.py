@@ -68,6 +68,7 @@ def run_edit(path: str | Path, instruction: str,
     if not ok2:
         return EditResult(False, None, "", f"після restore невалідно: {err2}", None)
 
+    final, _note = tools.match_style(original, final, str(Path(path).name))
     diff = tools.unified_diff(original, final, str(Path(path).name))
 
     backup = None

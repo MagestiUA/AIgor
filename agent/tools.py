@@ -44,6 +44,95 @@ def backup_file(path: str | Path) -> str | None:
     return str(bak)
 
 
+# ── Збереження стилю файлу при перезаписі ────────────────────────────────────
+# Живий кейс (Cerberus3): агент переписав Cerberus.py повністю, і всі 1023 рядки з
+# відступом-табом стали пробілами — diff на 2000 рядків замість реальних ~640.
+# Модель по замовчуванню пише 4 пробіли; стиль проєкту вона не знає й не питає.
+def detect_indent(text: str) -> str | None:
+    """'tab' | 'space' | None — яким відступом переважно починаються рядки."""
+    tabs = spaces = 0
+    for ln in text.splitlines():
+        if ln.startswith("\t"):
+            tabs += 1
+        elif ln.startswith("  "):
+            spaces += 1
+    if not tabs and not spaces:
+        return None
+    return "tab" if tabs >= spaces else "space"
+
+
+def _string_content_lines(src: str) -> set[int] | None:
+    """Номери рядків (з 1), що лежать ВСЕРЕДИНІ багаторядкових рядкових літералів —
+    їхній вміст чіпати не можна. None, якщо код не токенізується."""
+    import io
+    import tokenize
+    inside: set[int] = set()
+    try:
+        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+            if tok.type == tokenize.STRING and tok.end[0] > tok.start[0]:
+                inside.update(range(tok.start[0] + 1, tok.end[0] + 1))
+    except (tokenize.TokenError, IndentationError, SyntaxError):
+        return None
+    return inside
+
+
+def _indent_unit(src: str) -> int:
+    widths = []
+    for ln in src.splitlines():
+        n = len(ln) - len(ln.lstrip(" "))
+        if n and ln.strip() and not ln.startswith("\t"):
+            widths.append(n)
+    if not widths:
+        return 4
+    for u in (4, 2, 3, 8):
+        if all(w % u == 0 for w in widths):
+            return u
+    return min(widths)
+
+
+def _reindent(src: str, to: str) -> str | None:
+    """Python-код: ведучі відступи рядків коду пробіли<->таби; вміст багаторядкових
+    рядків не чіпаємо. None — якщо токенізація не вдалась (тоді нічого не міняємо)."""
+    inside = _string_content_lines(src)
+    if inside is None:
+        return None
+    unit = _indent_unit(src)
+    out = []
+    for i, ln in enumerate(src.split("\n"), 1):
+        if i in inside or not ln.strip():
+            out.append(ln)
+            continue
+        if to == "tab":
+            n = len(ln) - len(ln.lstrip(" "))
+            out.append(("\t" * (n // unit) + " " * (n % unit) + ln[n:]) if n else ln)
+        else:
+            n = len(ln) - len(ln.lstrip("\t"))
+            out.append((" " * (unit * n) + ln[n:]) if n else ln)
+    return "\n".join(out)
+
+
+def match_style(old: str, new: str, path: str = "") -> tuple[str, str]:
+    """Привести новий вміст до стилю старого (відступи, закінчення рядків).
+    Повертає (текст, примітка для моделі/логу; порожня — якщо нічого не міняли)."""
+    notes = []
+    if "\r\n" in old and "\r\n" not in new and "\n" in new:
+        new = new.replace("\n", "\r\n")
+        notes.append("закінчення рядків приведено до CRLF як в оригіналі")
+    o, n = detect_indent(old), detect_indent(new.replace("\r\n", "\n"))
+    if o and n and o != n:
+        if path.endswith(".py"):
+            body = new.replace("\r\n", "\n")
+            fixed = _reindent(body, "tab" if o == "tab" else "space")
+            if fixed is not None:
+                new = fixed.replace("\n", "\r\n") if "\r\n" in new else fixed
+                notes.append(f"відступи приведено до {'табів' if o == 'tab' else 'пробілів'} як в оригіналі")
+            else:
+                notes.append(f"УВАГА: стиль відступів змінено ({o} → {n}), автоматично привести не вдалось")
+        else:
+            notes.append(f"УВАГА: стиль відступів змінено ({o} → {n}) — збережи стиль оригіналу")
+    return new, "; ".join(notes)
+
+
 def validate_python(src: str) -> tuple[bool, str]:
     """Чи валідний синтаксис. Executor викликає перед записом результату LLM."""
     try:

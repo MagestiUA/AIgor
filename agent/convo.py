@@ -23,7 +23,19 @@ import re
 
 from . import config
 from . import limits
+from . import logs
 from .llm import OllamaClient
+
+def notify_compress(on_compress, what: str, before: int, after: int) -> None:
+    """Повідомити, що відбулось СТИСНЕННЯ контексту (побажання розробників: Ігорь має
+    казати про це): пишемо в лог і викликаємо колбек (UI показує нотатку в чаті)."""
+    logs.get("context").info("стиснення: %s %d -> %d симв.", what, before, after)
+    if on_compress:
+        try:
+            on_compress(what, before, after)
+        except Exception:
+            logs.get("context").exception("колбек стиснення впав")
+
 
 BUDGET_CHARS = 32000          # ~10k токенів
 COMPRESS_TO = BUDGET_CHARS // 2
@@ -116,7 +128,7 @@ def compress_summary(summary: str, client: OllamaClient | None = None, kind: str
 
 def update_summary(summary: str, user_text: str, outcome: str,
                    client: OllamaClient | None = None, budget: int | None = None,
-                   kind: str = "code") -> str:
+                   kind: str = "code", on_compress=None) -> str:
     """Дописати епізод поточного запиту; стиснути, якщо вийшли за бюджет
     (budget None -> limits.get().summary, залежить від бекенда)."""
     budget = budget or limits.get().summary
@@ -125,7 +137,9 @@ def update_summary(summary: str, user_text: str, outcome: str,
         return summary
     new = (summary + "\n- " + ep).strip() if summary else "- " + ep
     if len(new) > budget:
+        before = len(new)
         new = compress_summary(new, client, kind=kind)
+        notify_compress(on_compress, "підсумок розмови", before, len(new))
     return new
 
 
@@ -173,7 +187,8 @@ def _is_empty_echo(text: str) -> bool:
 
 
 def update_digest(digest: str, chunk: str, client: OllamaClient | None = None,
-                  budget: int | None = None, profile: dict = config.EXECUTOR) -> str:
+                  budget: int | None = None, profile: dict = config.EXECUTOR,
+                  on_compress=None) -> str:
     """Злити новий шматок великого документа в дайджест (файл-памʼять). Якщо
     результат вийшов за бюджет — стиснути ще раз тим самим промптом (він і так
     зливає/стискає, тож повторний прохід над самим дайджестом природно коротшає).
@@ -192,6 +207,7 @@ def update_digest(digest: str, chunk: str, client: OllamaClient | None = None,
     if _is_empty_echo(out):
         out = digest
     if len(out) > budget:
+        before = len(out)
         msg2 = client.chat(
             [{"role": "system", "content": _DIGEST_SYSTEM},
              {"role": "user", "content": f"Поточний дайджест (СТИСНИ, забагато):\n{out}\n\n"
@@ -201,4 +217,5 @@ def update_digest(digest: str, chunk: str, client: OllamaClient | None = None,
         out2 = _strip_echoed_label((msg2.get("content") or "").strip(), "Поточний дайджест",
                                    "Updated digest", "Digest")
         out = out if _is_empty_echo(out2) else out2
+        notify_compress(on_compress, "дайджест файлу", before, len(out))
     return out

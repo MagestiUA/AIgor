@@ -100,6 +100,25 @@ def main() -> None:
     t_empty = convo.generate_title("щось", client=Stub(["(порожньо)"]))
     assert t_empty == "", repr(t_empty)
 
+    # сповіщення про стиснення (побажання розробників): колбек викликається РІВНО коли
+    # відбувся стискаючий прохід — для підсумку розмови та дайджесту файлу
+    ev: list = []
+    cb = lambda what, b, a: ev.append((what, b, a))
+    convo.update_summary("y" * 5000, "щось", "результат", client=Stub(["епізод", "СТИСНУТО"]),
+                         budget=1000, on_compress=cb)
+    assert ev and ev[0][0] == "підсумок розмови" and ev[0][1] > 1000 and ev[0][2] == len("СТИСНУТО"), ev
+    ev.clear()
+    convo.update_summary("", "коротко", "ок", client=Stub(["епізод"]), budget=1000, on_compress=cb)
+    assert ev == [], "без переповнення сповіщення не потрібне"
+    convo.update_digest("x" * 200, "шматок", client=Stub(["y" * 5000, "СТИСНУТО"]), budget=1000, on_compress=cb)
+    assert ev and ev[0][0] == "дайджест файлу" and ev[0][2] == len("СТИСНУТО"), ev
+    ev.clear()
+    convo.update_digest("", "шматок", client=Stub(["короткий дайджест"]), budget=1000, on_compress=cb)
+    assert ev == []
+    # збій колбека не ламає стиснення
+    assert convo.update_summary("y" * 5000, "щось", "р", client=Stub(["е", "СТИСНУТО"]), budget=1000,
+                                on_compress=lambda *a: 1 / 0) == "СТИСНУТО"
+
     print("OK: convo — епізоди, дописування, стиснення за бюджетом, порожній епізод, as_context, "
           "chat/code kind різні промпти, update_digest шматків, generate_title (чиста/echo/задовга/порожня)")
 

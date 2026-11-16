@@ -961,8 +961,13 @@ class State(rx.State):
         suffix = suffix_match.group(0) if suffix_match else ""
         chunk_text = body[:suffix_match.start()] if suffix_match else body
         prev = memory.get(name, "")
+        events: list[str] = []
         digest = await asyncio.to_thread(
-            lambda: convo.update_digest(prev, chunk_text, client, profile=profile))
+            lambda: convo.update_digest(prev, chunk_text, client, profile=profile,
+                                        on_compress=lambda w, b, a: events.append(self._compress_msg(w, b, a, name))))
+        for ev in events:
+            async with self:
+                self._append("assistant", ev, "note")
         memory[name] = digest
         return f"=== {name} (дайджест прочитаного дотепер) ===\n{digest}{suffix}"
 
@@ -1336,12 +1341,19 @@ class State(rx.State):
         # chat: загальний підсумок розмови менше потрібен у деталях (деталі живуть у
         # темах нижче) — зменшуємо бюджет умовно втричі, як домовлено з користувачем.
         budget = limits.get().summary // 3 if chat else limits.get().summary
+        events: list[str] = []
+        note_cb = lambda w, b, a: events.append(self._compress_msg(w, b, a))     # noqa: E731
         new = await asyncio.to_thread(
-            lambda: convo.update_summary(cur, user_text, outcome, client, budget=budget, kind=kind))
+            lambda: convo.update_summary(cur, user_text, outcome, client, budget=budget, kind=kind,
+                                         on_compress=note_cb))
         new_topics = cur_topics
         if chat:
             new_topics = await asyncio.to_thread(
-                lambda: self._update_topic(user_text, outcome, cur_topics, client))
+                lambda: self._update_topic(user_text, outcome, cur_topics, client, note_cb))
+        for ev in events:                              # побажання розробників: казати про стиснення
+            async with self:
+                if self.current_id == cid:
+                    self._append("assistant", ev, "note")
         async with self:
             if self.current_id == cid:                # та сама сесія — оновити й у State
                 self.context_summary = new
@@ -1352,7 +1364,14 @@ class State(rx.State):
                 s.topics = new_topics
                 sess.save_session(s)
 
-    def _update_topic(self, user_text: str, outcome: str, cur_topics: list[str], client) -> list[str]:
+    @staticmethod
+    def _compress_msg(what: str, before: int, after: int, name: str = "") -> str:
+        label = f"{what} «{name}»" if name else what
+        return (f"🗜 Стиснув контекст: {label} — було {before:_} → стало {after:_} символів "
+                "(старі деталі згорнуто, щоб вміститись у вікно моделі).").replace("_", " ")
+
+    def _update_topic(self, user_text: str, outcome: str, cur_topics: list[str], client,
+                      on_compress=None) -> list[str]:
         """Класифікувати цей хід розмови за темою (нова чи існуюча — список тем
         СПІЛЬНИЙ для всього chat-режиму, не лише цієї сесії), злити в нотатку теми
         й зберегти на диск. Повертає оновлений список тем ЦІЄЇ сесії (для підказки
@@ -1360,7 +1379,8 @@ class State(rx.State):
         existing = topics.list_topics()
         name = topics.classify_topic(user_text, outcome, existing, client, profile=config.CHAT_EXECUTOR)
         prev = topics.load_topic(name)
-        note = topics.update_topic_note(prev, user_text, outcome, client, profile=config.CHAT_EXECUTOR)
+        note = topics.update_topic_note(prev, user_text, outcome, client, profile=config.CHAT_EXECUTOR,
+                                        on_compress=on_compress)
         if not note.strip():
             # Куций хід (нема що класифікувати) -> модель не дала нічого корисного
             # (update_topic_note вже відкинула луна-плейсхолдери) — НЕ створюємо

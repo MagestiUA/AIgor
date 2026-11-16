@@ -102,6 +102,12 @@ def main() -> None:
         topics.save_topic("../../escape", "x")
         assert not (topics.TOPICS_ROOT.parent.parent / "escape.txt").exists()
 
+        # сповіщення про стиснення нотатки теми
+        ev: list = []
+        topics.update_topic_note("x" * 200, "ще", "ще", client=Stub(["y" * 5000, "СТИСНУТО"]), budget=1000,
+                                 on_compress=lambda w, b, a: ev.append((w, b, a)))
+        assert ev and ev[0][0] == "нотатка теми" and ev[0][2] == len("СТИСНУТО"), ev
+
         print("OK: topics — класифікація (нова/існуюча), злиття нотатки, бюджет, "
               "fallback на невалідний JSON, topics_note, захист імені файлу")
     finally:
