@@ -23,6 +23,7 @@ from agent import config
 from agent import convo
 from agent import activity as act
 from agent import context_view as cv
+from agent import orchestration as orch
 from agent.loopguard import (CONTEXT_FULL_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from agent import limits
 from agent import logs
@@ -34,6 +35,7 @@ from agent.agent_loop import (ITER_LIMIT_MSG, is_incomplete, _estimate_iters, NU
                               _looks_like_leaked_reasoning,
                               extract_intended_attachments)
 from agent.answerer import build_context
+from agent.hierarchical import check_consistency
 from agent.intent import classify_intent
 from agent.llm import OllamaClient
 from agent.memory import render_for_planner
@@ -178,6 +180,7 @@ class State(rx.State):
     activity: list[dict[str, str]] = []    # жива стрічка: запити до моделі й виклики тулів (під катом)
     activity_last: str = ""                # ISO-час останньої події (годинник «N с тому» на клієнті)
     _act_seq: int = 0                      # лічильник id подій (backend-only)
+    _step_touched: list = []               # файли, які змінив останній виконаний крок (backend-only)
     git_is_repo: bool = False              # робоча тека — git-репозиторій
     git_branch: str = ""
     git_add: int = 0
@@ -944,9 +947,38 @@ class State(rx.State):
             self.confirm_open = False
         return _CONFIRMS.pop(self.current_id, {}).get("ok", False)
 
+    def _step_context(self, plan, step, root: str, att_note: str) -> str:
+        """Контекст кроку: загальна задача + ПОВНИЙ план із результатами вже виконаних кроків
+        і змінених файлів (render_for_planner) — кроки бачать, що зробили попередні, а не
+        лише галочки. Підсумок розмови та вкладення — як і раніше."""
+        ctx = (f"Project root: {root}\n\nЗагальна задача: {plan.task}\n"
+               f"План і результати вже виконаних кроків (ти виконуєш ЛИШЕ крок #{step.id}):\n"
+               f"{render_for_planner(plan)}")
+        if self.context_summary:
+            ctx += f"\n{convo.as_context(self.context_summary)}"
+        if att_note:
+            ctx += "\n" + att_note
+        return ctx
+
+    def _save_pending(self, plan) -> None:
+        """Зберегти план (зі статусами) як очікуваний: «Виконати» продовжить з першого
+        невиконаного кроку. Викликати всередині `async with self`."""
+        s = sess.load_session(self.current_id)
+        s.set_pending_plan(plan)
+        sess.save_session(s)
+        self.has_pending = True
+
     async def _execute_steps(self, plan, root: str, client):
         """Виконати кроки плану через per-step tool-loop: модель сама обирає тули
         (read/write/edit/run_shell), ми лише показуємо її дії та diff у чаті.
+
+        Керування (фідбек розробників):
+          * кроки бачать результати попередніх (render_for_planner), а не лише галочки;
+          * виконані кроки пропускаємо — так план ВІДНОВЛЮЄТЬСЯ з місця зупинки;
+          * невдалий крок (зациклився / ліміт / контекст) ЗУПИНЯЄ план і лишає його як
+            очікуваний («Виконати» повторить з цього кроку), а не будує далі на зламаному;
+          * після останнього кроку — звірка (_verify_plan): синтаксис змінених файлів +
+            перевірка узгодженості, з обмеженим повтором проблемного кроку.
 
         ToolContext: edits=auto (план уже схвалено — через plan_first або edits=auto).
         shell передаємо як є; для shell=ask confirm показує модальний попап."""
@@ -956,34 +988,105 @@ class State(rx.State):
             att_note = self._attachments_note()    # шляхи файлів; виконавець читає read_file
         stop_ev = _STOP_EVENTS.get(cid)
         stopped = False
-        # Огляд усього плану — щоб виконавець кожного кроку бачив МЕТУ й сусідні кроки,
-        # а не отримував голий опис кроку без контексту (інакше на розмитому кроці модель
-        # «розмірковує» замість дії й крок тихо провалюється).
-        plan_overview = "\n".join(
-            f"  {'[x]' if s.status == 'done' else '[!]' if s.status == 'failed' else '[ ]'} "
-            f"#{s.id} [{s.kind}]: {s.description}" for s in plan.steps)
+        failed = None
+        final = ""
+        touched_by_step: dict[int, list[str]] = {}
+        total = len(plan.steps)
+        done_before = sum(1 for s in plan.steps if s.status == "done")
+        if 0 < done_before < total:
+            nxt = next(s for s in plan.steps if s.status != "done")
+            async with self:
+                self._append("assistant", f"▶ Продовжую план з кроку #{nxt.id} (виконано {done_before} з {total}).", "note")
         for step in plan.steps:
+            if step.status == "done":
+                continue
             if stop_ev is not None and stop_ev.is_set():       # перервано між кроками
                 stopped = True
                 break
             async with self:
-                self.status = f"Крок #{step.id}: {step.description[:50]}"
+                self.status = f"Крок #{step.id}/{total}: {step.description[:50]}"
             if step.kind == "inline":
                 plan.set_result(step.id, "done", "inline")
                 continue
-            step_ctx = (f"Project root: {root}\n\nЗагальна задача: {plan.task}\n"
-                        f"Повний план (ти виконуєш ЛИШЕ крок #{step.id}):\n{plan_overview}")
-            if self.context_summary:
-                step_ctx += f"\n{convo.as_context(self.context_summary)}"
-            if att_note:
-                step_ctx += "\n" + att_note
             final, log = await self._run_tool_step(step.description, ctx,
                                                    title=step.description[:60],
-                                                   context=step_ctx, stop_event=stop_ev)
-            plan.set_result(step.id, "done" if (log and not is_incomplete(final)) else "failed", final or "—")
+                                                   context=self._step_context(plan, step, root, att_note),
+                                                   stop_event=stop_ev)
+            ok = bool(log) and not is_incomplete(final)
+            plan.set_result(step.id, "done" if ok else "failed", final or "—")
+            async with self:
+                files = list(self._step_touched)
+            if files:
+                touched_by_step[step.id] = files
+                plan.facts["змінені файли"] = ", ".join(dict.fromkeys(
+                    f for fl in touched_by_step.values() for f in fl))[:500]
+            if not ok:
+                failed = step
+                break
+
+        if failed is not None:
+            async with self:
+                self._append("assistant",
+                             f"⛔ Крок #{failed.id} не завершено: {(final or '—')[:240]}\n\nРешту кроків призупинено, "
+                             "щоб не будувати на зламаному. Натисніть «Виконати» — продовжу з цього кроку, "
+                             "або «Відхилити».", "note")
+                self._save_pending(plan)
+            return render_for_planner(plan)
+
+        verify_note = ""
+        if stopped:
+            if any(s.status != "done" for s in plan.steps):
+                async with self:
+                    self._save_pending(plan)              # можна відновити кнопкою «Виконати»
+        elif touched_by_step:
+            verify_note = await self._verify_plan(plan, root, client, ctx, touched_by_step, stop_ev, att_note)
         async with self:
-            self._append("assistant", "⛔ Зупинено" if stopped else "Готово ✓", "note")
-        return render_for_planner(plan)               # outcome для фонового підсумку
+            self._append("assistant", "⛔ Зупинено — решту можна продовжити кнопкою «Виконати»" if stopped
+                         else "Готово ✓", "note")
+        return render_for_planner(plan) + (f"\n{verify_note}" if verify_note else "")
+
+    async def _verify_plan(self, plan, root: str, client, ctx, touched_by_step: dict, stop_ev, att_note: str) -> str:
+        """Звірка після всіх кроків: (1) змінені .py компілюються; (2) LLM-перевірка узгодженості
+        кроків (hierarchical.check_consistency). Проблему виправляємо ПОВТОРОМ одного кроку з
+        уточненням — не більше 2 раундів, щоб не крутитись. Повертає рядок для підсумку."""
+        def all_files() -> list[str]:
+            return list(dict.fromkeys(f for fl in touched_by_step.values() for f in fl))
+
+        async with self:
+            self.status = "Перевіряю результат…"
+            self._append("assistant", "🔍 Перевіряю результат: синтаксис змінених файлів і узгодженість кроків…", "note")
+        for _ in range(2):
+            bad = await asyncio.to_thread(lambda: orch.syntax_report(root, all_files()))
+            if bad:
+                path, msg = bad[0]
+                note = f"У файлі {path} синтаксична помилка: {msg}. Виправ її, не ламаючи решту."
+                step_id = orch.pick_step(touched_by_step, [p for p, _ in bad])
+            else:
+                plan.facts["синтаксис"] = "ок (змінені .py компілюються)"
+                verdict = await asyncio.to_thread(lambda: check_consistency(plan, client))
+                step_id = verdict.get("step_id")
+                if verdict["ok"] or not any(s.id == step_id for s in plan.steps):
+                    async with self:
+                        self._append("assistant", "✓ Звірка пройшла: кроки узгоджені, змінені файли без синтаксичних помилок.", "note")
+                    return "Звірка: ок."
+                note = verdict.get("note") or "узгодь результат кроків"
+            step = next((s for s in plan.steps if s.id == step_id), plan.steps[-1])
+            async with self:
+                self._append("assistant", f"⚠ Звірка: {note[:300]}\n\nПовторюю крок #{step.id}.", "note")
+            final, log = await self._run_tool_step(
+                step.description + f"\nУточнення після перевірки: {note}", ctx,
+                title=f"повтор: {step.description[:50]}",
+                context=self._step_context(plan, step, root, att_note), stop_event=stop_ev)
+            plan.set_result(step.id, "done" if (log and not is_incomplete(final)) else "failed", final or "—")
+            async with self:
+                touched_by_step.setdefault(step.id, []).extend(self._step_touched)
+        bad = await asyncio.to_thread(lambda: orch.syntax_report(root, all_files()))
+        if bad:
+            async with self:
+                self._append("assistant", f"⚠ Після повторів лишилась синтаксична помилка у {bad[0][0]}: {bad[0][1]}. "
+                                          "Перегляньте вручну.", "note")
+            return f"Звірка: лишилась помилка у {bad[0][0]}."
+        return "Звірка: проблеми виправлено повтором."
 
     def _exec_ctx(self, root: str, client) -> ToolContext:
         """ToolContext для виконання: edits=auto (план/запит уже схвалено). Підтвердження
@@ -1041,6 +1144,7 @@ class State(rx.State):
             lambda: _estimate_iters(step_text, context, client))
         guard = LoopGuard()
         actions: list[tuple[str, str]] = []   # (tool, result)
+        touched: list[str] = []               # файли, змінені цим кроком (для звірки)
         stats: list[dict] = []                # client.last_stats кожного виклику моделі
         final = ITER_LIMIT_MSG
         nudged = False
@@ -1085,6 +1189,8 @@ class State(rx.State):
                 args = _args(call)
                 result = await self._dispatch_tool(reg, name, args, ctx)
                 actions.append((name, result))
+                if act.result_ok(result):
+                    touched.extend(orch.touched_paths(name, args))
                 messages.append({"role": "tool", "content": result})
                 guard.observe(name, args, result)
             verdict = guard.check()
@@ -1120,6 +1226,7 @@ class State(rx.State):
         if final:
             content += f"\n\n{final}"
         async with self:
+            self._step_touched = list(dict.fromkeys(touched))
             self._add_stats(stats)                       # лічильник над полем вводу
             self._append("assistant", content, "step", thinking=log_md)
         return final, log
@@ -1712,6 +1819,9 @@ class State(rx.State):
             # стейджинг-чіпи прибираємо з-під інпута. Файли лишаються на диску.
             self._append("user", text, attachments=att_names)
             self.attachments = []
+            if self.has_pending and not self.busy and orch.is_confirmation(text):
+                self._append("assistant", "Це підтвердження плану — натисніть «Виконати» під планом (або «Відхилити»).", "note")
+                return
             if self.busy or self.has_pending or self.has_question:                              # модель зайнята або чекає на дію користувача -> у чергу
                 self.queued_text = (self.queued_text + "\n\n" + text).strip() if self.queued_text else text
                 return
@@ -1767,6 +1877,7 @@ class State(rx.State):
             plan_first = self.plan_first or self.edits == "ask"
             summary = self.context_summary
             att_note = self._attachments_note()     # шляхи прикріплених файлів (модель читає сама)
+            last_ai = orch.last_assistant_text(self.messages)      # ПОВНА попередня відповідь (не підсумок)
             answering = self.has_question
             if answering:
                 self.has_question = False
@@ -1782,7 +1893,16 @@ class State(rx.State):
         elif answering:
             su, so = await self._resume_planning(text, root, plan_first, client)
         else:
-            mode = await asyncio.to_thread(lambda: classify_intent(text, client))
+            approved = orch.expand_confirmation(text, last_ai)      # «роби» = виконай щойно запропоноване
+            if approved:
+                mode, task_text = "edit", approved
+                su = f"{text} (виконати запропоноване: {last_ai[:160]}…)"
+                async with self:
+                    self._append("assistant", "▶ Сприймаю це як команду виконати те, що щойно було запропоновано.", "note")
+            else:
+                task_text = text
+                mode = await asyncio.to_thread(
+                    lambda: classify_intent(text, client, context=orch.context_for_intent(last_ai)))
             if mode == "answer":
                 async with self:
                     self.status = "Аналізую код…"
@@ -1804,8 +1924,9 @@ class State(rx.State):
                     self.status = "Обмірковую план…"
                 doc = await asyncio.to_thread(lambda: load_project_doc(root))
                 struct = await asyncio.to_thread(lambda: scan_structure(root))
-                su, so = await self._deliberate_flow(
-                    text, convo.as_context(summary) + struct, doc, [], root, plan_first, client)
+                su2, so = await self._deliberate_flow(
+                    task_text, convo.as_context(summary) + struct, doc, [], root, plan_first, client)
+                su = su2 if not approved else su
 
         if (so or "").strip():
             await self._maybe_auto_title(text, client)
@@ -1894,9 +2015,13 @@ class State(rx.State):
             async with self:
                 self._append("assistant", "Не вдалося скласти план.", "note")
             return task, ""
-        if plan_first:
+        big = orch.is_big_plan(state)                 # ≥4 кроків — показуємо на схвалення НАВІТЬ без «план наперед»
+        if plan_first or big:
+            n_act = sum(1 for s in state.steps if s.kind != "inline")
+            head = (f"⚠ **Великий план: {n_act} кроків.** Перегляньте й підтвердьте (кнопка «Виконати»), "
+                    "перш ніж я почну.\n\n") if big else ""
             async with self:
-                self._append("assistant", render_for_planner(state), "plan")
+                self._append("assistant", head + render_for_planner(state), "plan")
                 s = sess.load_session(self.current_id)
                 s.set_pending_plan(state)
                 sess.save_session(s)

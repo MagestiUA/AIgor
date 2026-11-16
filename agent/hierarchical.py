@@ -43,7 +43,9 @@ CONSISTENCY_SYSTEM = (
     "You review an executed plan (compact slice: steps, statuses, short results). Decide "
     "if all steps are mutually consistent and the task is complete. Reply ONLY as JSON: "
     "{\"ok\": true} if consistent; otherwise {\"ok\": false, \"step_id\": N, \"note\": "
-    "\"what to fix\"} naming ONE step to redo with a short clarification (user's language)."
+    "\"what to fix\"} naming ONE step to redo with a short clarification (user's language). "
+    "Be conservative: report a problem ONLY if a step clearly failed or two steps contradict "
+    "each other; do not ask to redo a step just to polish it."
 )
 
 CONSISTENCY_SCHEMA = {

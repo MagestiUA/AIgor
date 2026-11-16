@@ -1,0 +1,153 @@
+"""Керуючий процес код-режиму: реальні State._execute_steps / _verify_plan на заглушці стану.
+Кроки «виконує» скриптова функція (модель не потрібна), сесії на диску не чіпаємо.
+
+Перевіряємо: кроки бачать результати попередніх; невдалий крок зупиняє план і лишає його для
+відновлення; відновлення пропускає виконані кроки; звірка ловить синтаксичну помилку й повторює
+крок; успішна звірка нічого не повторює."""
+import asyncio
+import tempfile
+import types
+from pathlib import Path
+
+import lca_web.lca_web as W
+from agent import limits
+from agent.agent_loop import ITER_LIMIT_MSG
+from agent.memory import TaskState
+
+limits.FORCE = limits.LOCAL
+
+
+class FakeState:
+    """Мінімум State, потрібний _execute_steps/_verify_plan."""
+    def __init__(self, root: Path, script):
+        self.root, self.script = root, script
+        self.current_id = "sid-test"
+        self.status = ""
+        self.context_summary = ""
+        self.notes: list[str] = []
+        self.pending_saved = None
+        self.has_pending = False
+        self._step_touched: list = []
+        self.step_contexts: list[str] = []
+        self.run_log: list[tuple[str, str]] = []
+        for name in ("_step_context", "_verify_plan"):
+            setattr(self, name, types.MethodType(getattr(W.State, name), self))
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    def _exec_ctx(self, root, client):
+        return object()
+
+    def _attachments_note(self):
+        return ""
+
+    def _append(self, role, content, kind="text", **kw):
+        self.notes.append(content)
+
+    def _save_pending(self, plan):
+        self.pending_saved = plan
+        self.has_pending = True
+
+    async def _run_tool_step(self, step_text, ctx, title="", context="", stop_event=None):
+        self.step_contexts.append(context)
+        self.run_log.append((title, step_text))
+        final, touched = self.script(step_text, self)
+        for rel, content in touched.items():
+            (self.root / rel).write_text(content, encoding="utf-8")
+        self._step_touched = list(touched)
+        return final, (["write_file -> ok"] if touched or final else [])
+
+
+def make_plan(n=3, statuses=None):
+    plan = TaskState(task="додати експорт")
+    for i in range(1, n + 1):
+        plan.add_step("llm", f"крок {i}")
+    for i, st in (statuses or {}).items():
+        plan.set_result(i, st, f"результат {i}")
+    return plan
+
+
+def run(state, plan, verdicts=None):
+    """Запустити реальний _execute_steps із підміненою звіркою (check_consistency)."""
+    seq = iter(verdicts or [{"ok": True}])
+    real = W.check_consistency
+    W.check_consistency = lambda p, c: next(seq, {"ok": True})
+    try:
+        execute = types.MethodType(W.State._execute_steps, state)
+        return asyncio.run(execute(plan, str(state.root), client=None))
+    finally:
+        W.check_consistency = real
+
+
+def main() -> None:
+    root = Path(tempfile.mkdtemp())
+
+    # 1) усе добре: кроки бачать результати попередніх + змінені файли; звірка проходить без повторів
+    def ok_script(text, st):
+        n = len(st.run_log)
+        return f"готово {n}", {f"mod{n}.py": f"x = {n}\n"}
+    st = FakeState(root, ok_script)
+    plan = make_plan(3)
+    out = run(st, plan)
+    assert [s.status for s in plan.steps] == ["done"] * 3 and len(st.run_log) == 3, st.run_log
+    assert "результат" in st.step_contexts[1] or "готово 1" in st.step_contexts[1], st.step_contexts[1]
+    assert "готово 1" in st.step_contexts[2] and "готово 2" in st.step_contexts[2]       # крок 3 бачить кроки 1–2
+    assert "mod1.py" in st.step_contexts[2] and "mod2.py" in st.step_contexts[2]         # …і змінені файли
+    assert any("Звірка пройшла" in n for n in st.notes) and st.notes[-1] == "Готово ✓"
+    assert not st.has_pending and "Звірка: ок" in out
+
+    # 2) крок 2 «зациклився» -> план зупиняється, крок 3 НЕ запускається, план лишається для відновлення
+    def stuck_script(text, st):
+        n = len(st.run_log)
+        return (ITER_LIMIT_MSG, {}) if n == 2 else (f"готово {n}", {f"s{n}.py": "y = 1\n"})
+    st = FakeState(root, stuck_script)
+    plan = make_plan(3)
+    run(st, plan)
+    assert [s.status for s in plan.steps] == ["done", "failed", "pending"] and len(st.run_log) == 2
+    assert st.has_pending and st.pending_saved is plan
+    assert any("Крок #2 не завершено" in n for n in st.notes) and "Готово ✓" not in st.notes
+
+    # 3) відновлення: виконані кроки пропускаються, продовжуємо з невдалого
+    def resume_script(text, st):
+        return f"виправлено {len(st.run_log)}", {f"r{len(st.run_log)}.py": "z = 1\n"}
+    st = FakeState(root, resume_script)
+    run(st, plan)
+    assert len(st.run_log) == 2 and st.run_log[0][1] == "крок 2", st.run_log          # лише кроки 2 і 3
+    assert [s.status for s in plan.steps] == ["done"] * 3 and not st.has_pending
+    assert any("Продовжую план з кроку #2" in n for n in st.notes)
+
+    # 4) звірка ловить синтаксичну помилку -> повтор того кроку з уточненням -> виправлено
+    def syntax_script(text, st):
+        if "Уточнення після перевірки" in text:
+            return "виправив", {"broken.py": "def f():\n    return 1\n"}
+        return "готово", {"broken.py": "def f(:\n    return 1\n"} if len(st.run_log) == 1 else {}
+    st = FakeState(root, syntax_script)
+    plan = make_plan(2)
+    out = run(st, plan)
+    assert len(st.run_log) == 3 and "Уточнення після перевірки" in st.run_log[2][1], st.run_log
+    assert "синтаксична помилка" in " ".join(st.notes) and "Звірка: ок" in out   # після повтору звірка чиста
+    assert not st.has_pending
+
+    # 5) LLM-звірка каже «крок 1 суперечить»: повтор кроку 1, потім ок (обмежено 2 раундами)
+    def consist_script(text, st):
+        return f"готово {len(st.run_log)}", {f"c{len(st.run_log)}.py": "q = 1\n"}
+    st = FakeState(root, consist_script)
+    plan = make_plan(2)
+    run(st, plan, verdicts=[{"ok": False, "step_id": 1, "note": "імена не збігаються"}, {"ok": True}])
+    assert len(st.run_log) == 3 and st.run_log[2][1].startswith("крок 1") and "імена не збігаються" in st.run_log[2][1]
+    assert any("Звірка пройшла" in n for n in st.notes)
+
+    # 6) нескінченна «неузгодженість» не крутить вічно: максимум 2 повтори
+    st = FakeState(root, consist_script)
+    plan = make_plan(2)
+    run(st, plan, verdicts=[{"ok": False, "step_id": 2, "note": "ще не так"}] * 5)
+    assert len(st.run_log) == 2 + 2, st.run_log
+    print("OK: orchestration_flow — результати між кроками, зупинка/відновлення, звірка і обмежені повтори")
+
+
+if __name__ == "__main__":
+    main()
