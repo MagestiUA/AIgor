@@ -102,7 +102,10 @@ def main() -> None:
            "--add-data", f"{stage / 'lca_web'};lca_web_src",
            "--hidden-import", "lca_web.lca_web",
            "--collect-submodules", "agent", "--collect-submodules", "lca_web",
-           "--collect-all", "granian", "--collect-all", "webview", "--collect-all", "ddgs"]
+           "--collect-all", "granian", "--collect-all", "webview", "--collect-all", "ddgs",
+           # залежності веб-пошуку: нативні розширення/динамічні імпорти, які аналіз PyInstaller не бачить
+           "--collect-all", "primp", "--collect-all", "lxml", "--collect-all", "httpx", "--collect-all", "h2",
+           "--collect-all", "brotli", "--collect-all", "click"]
     if (stage / "assets").is_dir():
         cmd += ["--add-data", f"{stage / 'assets'};assets"]
     reflex_dists = sorted({d.metadata["Name"] for d in md.distributions()
