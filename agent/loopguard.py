@@ -9,7 +9,10 @@
 не рахуємо — вони законно збігаються):
   A) однакова дія (тул + аргументи) з однаковим результатом 3 рази поспіль;
   B) ≥4 з останніх 6 викликів дали ОДИН І ТОЙ САМИЙ результат (різні команди, та сама стіна);
-  C) цикл A-B-A-B / A-B-C-A-B-C, де і дії, і результати повторюються (нової інформації нема).
+  C) цикл A-B-A-B / A-B-C-A-B-C, де і дії, і результати повторюються (нової інформації нема);
+  D) «жодної нової інформації»: у останніх 12 викликах кожен результат уже траплявся раніше в цьому
+     кроці, а різних дій ≤4 (ловить цикли, де результат трохи «плаває», напр. 96/101 символів, або
+     короткі відповіді типу "[]" чергуються з довшими — C цього не бачить).
 
 Реакція у два етапи: перше виявлення → «warn» (caller додає модель-підказку змінити
 підхід або пояснити блокер); повторне ПІСЛЯ підказки → «stop» (крок зупиняється з
@@ -22,6 +25,8 @@ import json
 
 MIN_RESULT_LEN = 12          # коротші результати ("rc=0", "ok") можуть збігатися законно
 WINDOW = 24
+NOVELTY_WINDOW = 12         # D: стільки останніх викликів без жодного нового результату
+IGNORED_TOOLS = {"project_note"}     # службові: однакові відповіді тут — норма
 
 WARN_TEXT = (
     "You are repeating the same actions without making progress: {reason}. Do NOT repeat "
@@ -47,22 +52,27 @@ def _h(result: str) -> str:
 
 class LoopGuard:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str, int]] = []     # (sig, result_hash, result_len)
+        self.calls: list[tuple[str, str, int, bool]] = []   # (sig, result_hash, result_len, новий_результат)
+        self.seen: set[str] = set()                     # усі результати цього кроку (не скидається на warn)
         self.warned = False
         self.last_result = ""
 
     def observe(self, name: str, args: dict, result: str) -> None:
-        self.calls.append((_sig(name, args), _h(result), len(result or "")))
+        if name in IGNORED_TOOLS:
+            return
+        h = _h(result)
+        self.calls.append((_sig(name, args), h, len(result or ""), h not in self.seen))
+        self.seen.add(h)
         self.calls = self.calls[-WINDOW:]
         self.last_result = result or ""
 
     def _repeated(self) -> str | None:
         c = self.calls
         # A: однакова дія з однаковим результатом 3 рази поспіль
-        if len(c) >= 3 and len({(s, h) for s, h, _ in c[-3:]}) == 1 and c[-1][2] >= MIN_RESULT_LEN:
+        if len(c) >= 3 and len({(s, h) for s, h, _, _ in c[-3:]}) == 1 and c[-1][2] >= MIN_RESULT_LEN:
             return f"однакова дія з однаковим результатом ×3 ({c[-1][0][:60]})"
         # B: ≥4 з останніх 6 — один і той самий (змістовний) результат
-        tail = [h for _, h, n in c[-6:] if n >= MIN_RESULT_LEN]
+        tail = [h for _, h, n, _ in c[-6:] if n >= MIN_RESULT_LEN]
         if len(c) >= 6 and tail:
             top = max(set(tail), key=tail.count)
             if tail.count(top) >= 4:
@@ -73,8 +83,13 @@ class LoopGuard:
             if len(c) >= need:
                 t = c[-need:]
                 if (all(t[i][:2] == t[i + p][:2] for i in range(need - p))
-                        and len({s for s, _, _ in t}) > 1 and all(n >= MIN_RESULT_LEN for _, _, n in t)):
+                        and len({s for s, _, _, _ in t}) > 1 and all(n >= MIN_RESULT_LEN for _, _, n, _ in t)):
                     return f"цикл із {p} дій, що повторюється без нових результатів"
+        # D: давно жодної нової інформації — усі результати вже були, дій мало
+        if len(c) >= NOVELTY_WINDOW:
+            t = c[-NOVELTY_WINDOW:]
+            if not any(novel for _, _, _, novel in t) and len({s for s, _, _, _ in t}) <= 4:
+                return f"останні {NOVELTY_WINDOW} викликів не дали жодного нового результату"
         return None
 
     def check(self) -> tuple[str, str] | None:

@@ -60,6 +60,30 @@ def main() -> None:
     v = feed(g, [("run_shell", {"command": "pytest"}, f"{i} failed, {10 - i} passed in 1.{i}s") for i in range(6)])
     assert all(x is None for x in v)
 
+    # 8) D (реальний кейс з логів тестера): A→"[]", B→96/101 симв. (результат «плаває»), так ~сотні разів.
+    #    C це не ловить (короткі результати, різні хеші), D — «12 викликів без нового результату»
+    g = LoopGuard()
+    cyc = []
+    for i in range(60):
+        cyc.append(("run_shell", {"command": "adb devices"}, "[]"))
+        cyc.append(("run_shell", {"command": "adb shell dumpsys wifi"}, "x" * (96 if i % 2 else 101)))
+    v = feed(g, cyc)
+    kinds = [x[0] for x in v if x]
+    assert kinds[:2] == ["warn", "stop"], kinds
+    assert "жодного нового результату" in next(x[1] for x in v if x)
+    first = next(i for i, x in enumerate(v) if x)
+    assert first <= 16, first                      # ловимо за хвилину, а не після 700 викликів
+
+    # 9) а нові результати (справжній прогрес) D не зупиняє, навіть коли дій мало
+    g = LoopGuard()
+    v = feed(g, [("run_shell", {"command": "git log -1"}, f"commit {i:03d} message") for i in range(40)])
+    assert all(x is None for x in v)
+
+    # 10) project_note — службовий тул: підряд однакові відповіді не вважаються зацикленням
+    g = LoopGuard()
+    v = feed(g, [("project_note", {"path": f"f{i}.py", "note": "n"}, "нотатку збережено в карті проєкту") for i in range(8)])
+    assert all(x is None for x in v)
+
     # context_full
     assert context_full(240_000, 262_144) and not context_full(100_000, 262_144) and not context_full(10, 0)
     print("OK: loopguard — довга робота не рветься, повтор/різні команди з тим самим результатом/цикл ловляться, warn→stop")
