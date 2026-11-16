@@ -13,17 +13,47 @@
 """
 from __future__ import annotations
 
+import contextvars
+import json
 import logging
 import os
+import platform
+import subprocess
 import sys
 import threading
+import time
+import zipfile
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 LOG_DIR = Path.home() / ".local-code-agent" / "logs"
 MAX_BYTES = 2 * 1024 * 1024
 BACKUPS = 5
-_FMT = "%(asctime)s %(levelname)-7s %(name)s: %(message)s"
+_FMT = "%(asctime)s %(levelname)-7s [%(sid)s] %(name)s: %(message)s"
+# id поточного чату — потрапляє в кожен рядок логу (contextvars переходять у asyncio.to_thread),
+# щоб за логом можна було відокремити події одного чату від іншого.
+session_var: contextvars.ContextVar[str] = contextvars.ContextVar("igor_sid", default="-")
+
+
+class _SidFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.sid = session_var.get()[:8]
+        return True
+
+
+def app_version() -> str:
+    """Версія збірки: файл VERSION у корені (портативна збірка) або короткий git-хеш."""
+    root = Path(__file__).resolve().parent.parent
+    try:
+        return (root / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        pass
+    try:
+        p = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
+                           capture_output=True, text=True, timeout=3)
+        return p.stdout.strip() or "dev"
+    except (OSError, subprocess.SubprocessError):
+        return "dev"
 _configured: set[str] = set()
 
 
@@ -50,6 +80,7 @@ def setup(name: str = "igor", level: int | str | None = None) -> logging.Logger:
         h = RotatingFileHandler(LOG_DIR / f"{name}.log", maxBytes=MAX_BYTES, backupCount=BACKUPS,
                                 encoding="utf-8")
         h.setFormatter(logging.Formatter(_FMT))
+        h.addFilter(_SidFilter())
         log.addHandler(h)
     except OSError:
         pass                                    # логування не має валити застосунок
@@ -66,10 +97,66 @@ def setup(name: str = "igor", level: int | str | None = None) -> logging.Logger:
     threading.excepthook = lambda a: log.critical(
         "Необроблений виняток у потоці %s", getattr(a.thread, "name", "?"),
         exc_info=(a.exc_type, a.exc_value, a.exc_traceback))
-    log.info("=== старт процесу pid=%s python=%s ===", os.getpid(), sys.version.split()[0])
+    log.info("=== старт процесу pid=%s python=%s ігорь=%s ОС=%s ===", os.getpid(),
+             sys.version.split()[0], app_version(), platform.platform())
     return log
 
 
 def get(sub: str = "") -> logging.Logger:
     """Логер підсистеми: igor.llm, igor.tools, igor.agent… (діти налаштованого `igor`)."""
     return logging.getLogger("igor" + (f".{sub}" if sub else ""))
+
+
+def raw_file_logger(name: str) -> logging.Logger:
+    """Логер «як є» (без часу/рівня) з ротацією — для рядків stdout/stderr дочірнього
+    процесу (Reflex/Granian), які лаунчер перенаправляє в igor-server.log. Тут видно
+    збої старту й traceback-и самого фреймворку, які не проходять через igor.log."""
+    log = logging.getLogger(name)
+    if name in _configured:
+        return log
+    log.setLevel(logging.INFO)
+    try:
+        LOG_DIR.mkdir(parents=True, exist_ok=True)
+        h = RotatingFileHandler(LOG_DIR / f"{name}.log", maxBytes=MAX_BYTES, backupCount=BACKUPS,
+                                encoding="utf-8")
+        h.setFormatter(logging.Formatter("%(asctime)s %(message)s"))
+        log.addHandler(h)
+    except OSError:
+        pass
+    log.propagate = False
+    _configured.add(name)
+    return log
+
+
+DIAG_DIR = Path.home() / ".local-code-agent" / "diagnostics"
+
+
+def make_diagnostics(settings_path: Path | None = None) -> Path:
+    """Архів для передачі розробнику: усі логи + налаштування БЕЗ ключа + версії/ОС.
+    Вмісту чатів і файлів проєктів там немає."""
+    DIAG_DIR.mkdir(parents=True, exist_ok=True)
+    out = DIAG_DIR / f"igor-diag-{time.strftime('%Y%m%d-%H%M%S')}.zip"
+    info = {"ігорь": app_version(), "python": sys.version, "ОС": platform.platform(),
+            "створено": time.strftime("%Y-%m-%d %H:%M:%S"), "рівень_логів": os.environ.get("IGOR_LOG_LEVEL", "INFO"),
+            "вміст_у_логах": content_enabled()}
+    try:
+        import reflex
+        info["reflex"] = getattr(reflex, "__version__", "?")
+    except Exception:
+        pass
+    settings: dict = {}
+    sp = settings_path or (Path.home() / ".local-code-agent" / "settings.json")
+    try:
+        settings = json.loads(sp.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        pass
+    if settings.get("llm_api_key"):
+        settings["llm_api_key"] = "<прихований>"
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("info.json", json.dumps(info, ensure_ascii=False, indent=2))
+        z.writestr("settings.json", json.dumps(settings, ensure_ascii=False, indent=2))
+        if LOG_DIR.is_dir():
+            for p in sorted(LOG_DIR.iterdir()):
+                if p.is_file():
+                    z.write(p, f"logs/{p.name}")
+    return out

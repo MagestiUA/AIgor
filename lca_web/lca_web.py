@@ -817,6 +817,19 @@ class State(rx.State):
         self.llm_key_saved = bool(new.get("llm_api_key"))
         self.llm_test_msg, self.llm_test_ok = "Збережено.", True
 
+    @rx.event
+    def export_diagnostics(self):
+        """Зібрати архів з логами (без ключа й без вмісту чатів) і відкрити його теку."""
+        try:
+            path = logs.make_diagnostics()
+            _log.info("діагностику збережено: %s", path)
+            self.llm_test_msg, self.llm_test_ok = f"Діагностику збережено: {path}", True
+            import os as _os
+            _os.startfile(str(path.parent))        # відкрити теку в Провіднику
+        except Exception as e:
+            _log.exception("не вдалось зібрати діагностику")
+            self.llm_test_msg, self.llm_test_ok = f"Не вдалось зібрати діагностику: {e}", False
+
     @rx.event(background=True)
     async def test_llm_connection(self):
         """Перевірити адресу/порт/ключ (GET /models) до збереження; підставляє модель."""
@@ -1651,6 +1664,7 @@ class State(rx.State):
         Винятки (обрив зʼєднання з Ollama, кривий JSON тощо) ловимо тут і показуємо в
         чаті — інакше виняток вилітає з background-події ДО того, як has_pending/
         has_question/busy встигають скинутись, і кнопки/черга висять назавжди."""
+        logs.session_var.set(self.current_id or "-")      # id чату в усіх рядках лога цього запиту
         try:
             await self._process_one_inner(text)
         except Exception as e:
@@ -2075,6 +2089,8 @@ def llm_connection_section() -> rx.Component:
             rx.button("Перевірити", variant="soft", on_click=State.test_llm_connection,
                       loading=State.llm_testing),
             rx.button("Зберегти", on_click=State.save_llm_settings),
+            rx.button("Діагностика", variant="outline", on_click=State.export_diagnostics,
+                      title="Зібрати логи в архів, щоб надіслати розробнику"),
             class_name="gap-2",
         ),
         rx.cond(State.llm_test_msg != "",

@@ -100,11 +100,18 @@ def _start_server(extra_args: list[str]) -> tuple[subprocess.Popen, "queue.Queue
     url_q: "queue.Queue[str]" = queue.Queue(maxsize=1)
     srv_state: dict = {"ollama_pid": None}
     found = False
+    try:
+        from agent import logs as _logs
+        srv_log = _logs.raw_file_logger("igor-server")
+    except Exception:
+        srv_log = None
 
     def _pump() -> None:
         nonlocal found
         for line in proc.stdout:
             print(line, end="")
+            if srv_log:
+                srv_log.info(line.rstrip())
             if not found:
                 m = APP_URL_RE.search(line)
                 if m:
