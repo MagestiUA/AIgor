@@ -22,6 +22,17 @@ MODEL = "gemma4:26b-a4b-it-qat"   # дефолт OllamaClient; профілі н
 
 REQUEST_TIMEOUT = 600
 
+# Бекенд LLM: "ollama" (локально, дефолт) | "openai" (орендований vLLM на H100,
+# OpenAI-сумісний API; клієнт — llm_openai.OpenAIClient). Перемикання: env LCA_BACKEND.
+# При "openai" профілі нижче лишаються (think/temperature працюють), а їхні
+# ollama-специфічні поля (model, num_ctx, DRY) ігноруються — модель одна: REMOTE_MODEL.
+# Ключ — з env LLM_API_KEY (у код/репо НЕ кладемо).
+import os as _os
+BACKEND = _os.environ.get("LCA_BACKEND", "ollama").lower()
+REMOTE_BASE_URL = _os.environ.get("LCA_REMOTE_URL", "http://llm.example.com:8000/v1")
+REMOTE_MODEL = _os.environ.get("LCA_REMOTE_MODEL", "Qwen3.8-27B-Uncensored")
+REMOTE_KEY_ENV = "LLM_API_KEY"
+
 # run_shell allow-list: дозволені префікси команд (точний токен або "<prefix> ...").
 # Усе інше блокується БЕЗ виконання. Виконуємо через shell=False (без ланцюжків).
 ALLOWED_SHELL = (

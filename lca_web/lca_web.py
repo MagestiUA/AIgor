@@ -52,10 +52,15 @@ _STOP_EVENTS: dict = {}
 # Вкладення зберігаються на диску (agent/attachments.py), не в пам'яті.
 
 
-def get_client() -> OllamaClient:
+def get_client():
+    """Єдиний клієнт на процес; бекенд за config.BACKEND (ollama | openai)."""
     global _CLIENT
     if _CLIENT is None:
-        _CLIENT = OllamaClient()
+        if config.BACKEND == "openai":
+            from agent.llm_openai import OpenAIClient
+            _CLIENT = OpenAIClient()
+        else:
+            _CLIENT = OllamaClient()
     return _CLIENT
 
 
