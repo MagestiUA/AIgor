@@ -132,7 +132,35 @@ def raw_file_logger(name: str) -> logging.Logger:
 DIAG_DIR = Path.home() / ".local-code-agent" / "diagnostics"
 
 
-def make_diagnostics(settings_path: Path | None = None) -> Path:
+def network_report(llm_base_url: str = "", fetch=None, resolve=None) -> dict:
+    """Перевірка мережі для діагностики (фідбек: брандмауер/антивірус можуть блокувати
+    вихідні з'єднання нового .exe): DNS і HTTPS до DuckDuckGo (веб-пошук) та /health
+    LLM-сервера. Ключі НЕ використовуються. fetch/resolve підміняються в тестах."""
+    import socket
+    from urllib.parse import urlparse
+    if fetch is None:
+        import requests
+        fetch = lambda url: requests.get(url, timeout=6).status_code      # noqa: E731
+    resolve = resolve or socket.gethostbyname
+
+    def probe(name: str, call):
+        t0 = time.time()
+        try:
+            res = call()
+            return {"ok": True, "result": str(res), "сек": round(time.time() - t0, 2)}
+        except Exception as e:                                         # noqa: BLE001
+            return {"ok": False, "помилка": f"{type(e).__name__}: {str(e)[:200]}", "сек": round(time.time() - t0, 2)}
+
+    rep = {"dns_duckduckgo": probe("dns", lambda: resolve("duckduckgo.com")),
+           "https_duckduckgo": probe("https", lambda: fetch("https://duckduckgo.com/"))}
+    if llm_base_url:
+        u = urlparse(llm_base_url)
+        host = f"{u.scheme}://{u.hostname}" + (f":{u.port}" if u.port else "")
+        rep["llm_health"] = probe("llm", lambda: fetch(host + "/health"))
+    return rep
+
+
+def make_diagnostics(settings_path: Path | None = None, net_fetch=None, net_resolve=None) -> Path:
     """Архів для передачі розробнику: усі логи + налаштування БЕЗ ключа + версії/ОС.
     Вмісту чатів і файлів проєктів там немає."""
     DIAG_DIR.mkdir(parents=True, exist_ok=True)
@@ -156,6 +184,13 @@ def make_diagnostics(settings_path: Path | None = None) -> Path:
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("info.json", json.dumps(info, ensure_ascii=False, indent=2))
         z.writestr("settings.json", json.dumps(settings, ensure_ascii=False, indent=2))
+        try:
+            from .backend import build_base_url
+            base = build_base_url(settings.get("llm_host", ""), settings.get("llm_port", ""))
+            z.writestr("network.json", json.dumps(network_report(base, net_fetch, net_resolve),
+                                                   ensure_ascii=False, indent=2))
+        except Exception as e:                                         # noqa: BLE001
+            z.writestr("network.json", json.dumps({"помилка": f"{type(e).__name__}: {e}"}, ensure_ascii=False))
         if LOG_DIR.is_dir():
             for p in sorted(LOG_DIR.iterdir()):
                 if p.is_file():
