@@ -50,7 +50,8 @@ def app_version() -> str:
         pass
     try:
         p = subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"],
-                           capture_output=True, text=True, timeout=3)
+                           capture_output=True, text=True, timeout=3,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         return p.stdout.strip() or "dev"
     except (OSError, subprocess.SubprocessError):
         return "dev"

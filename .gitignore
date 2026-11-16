@@ -16,3 +16,6 @@ scratch/
 .attachments/
 .chat_topics/
 .env
+# збірка .exe (scripts/build_exe.py)
+build/
+dist/

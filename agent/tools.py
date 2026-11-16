@@ -199,7 +199,8 @@ def run_shell(command: str, cwd: str | None = None, timeout: int | None = None,
         # на Windows cp1251 давала «РЅР° РїРѕСЂС‚Сѓ» замість кирилиці) і просимо Python-діти писати UTF-8.
         env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUTF8": "1"}
         p = subprocess.run(args, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
-                           errors="replace", env=env, timeout=timeout, shell=False)
+                           errors="replace", env=env, timeout=timeout, shell=False,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))      # без чорних вікон у збірці без консолі
         return ShellResult(True, p.returncode, p.stdout, p.stderr)
     except subprocess.TimeoutExpired:
         return ShellResult(True, -1, "", f"timeout {timeout}s")

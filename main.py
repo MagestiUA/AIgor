@@ -1,33 +1,38 @@
-"""Точка входу local-code-agent: піднімає сервер і відкриває застосунок у
+"""Точка входу Ігоря (local-code-agent): піднімає сервер і відкриває застосунок у
 нативному вікні (pywebview, WebView2 на Windows) — без вкладки браузера.
 
 Зручно з PyCharm: відкрий цей файл і натисни ▶ Run (інтерпретатор — .venv проєкту).
 
-Сервер (Reflex) піднімається як ОКРЕМИЙ ПРОЦЕС, не потік: Granian/Reflex
-реєструє signal-handler, що працює лише в головному потоці головного
-інтерпретатора — у фоновому потоці це падає з "signal only works in main
-thread of the main interpreter" (перевірено живцем). Реальний URL читаємо З
-ВИВОДУ дочірнього процесу, а не хардкодимо :3000 — Reflex сам падає на інший
-порт (:3002 і т.д.), якщо 3000/3001/8000 зайняті (типово — залишки попередніх
-запусків чи WSL2/Hyper-V NAT-артефакти на Windows), і хардкод порту тоді
-змусить нас чекати URL, який ніколи не зʼявиться.
+Режими:
+  (за замовчуванням)  dev: `reflex run` у дочірньому процесі + вікно. Реальний URL
+                      читаємо З ВИВОДУ дочірнього процесу (Reflex сам падає на інший порт,
+                      якщо 3000/3001/8000 зайняті). Потребує Node/Bun (Reflex ставить сам).
+  --prod              БЕЗ Node/Bun: зібраний `reflex export` фронтенд віддає бекенд на
+                      вільному порту (agent/serve.py). Це ж режим готового .exe.
+  --prod --no-window  те саме, але без вікна: друкує URL (для перевірок/тестів).
+  --dev               класичний браузерний dev-режим у цьому процесі (devtools).
+  --serve <port>      ВНУТРІШНІЙ: бекенд зі статикою (його запускає лаунчер як дочірній процес).
 
---dev: класичний браузерний dev-режим без вікна, з devtools (те, що main.py
-робив раніше). Альтернатива — run_web.ps1, який кличе reflex.exe напряму,
-взагалі минаючи цей файл.
-Решта аргументів передається далі в `reflex run` (напр. `--env prod`).
+Сервер — ОКРЕМИЙ ПРОЦЕС, не потік: Granian/Reflex реєструє signal-handler, що працює
+лише в головному потоці головного інтерпретатора ("signal only works in main thread").
+Решта аргументів dev-режиму передається далі в `reflex run`.
 """
 from __future__ import annotations
 
 import json
+import multiprocessing
 import os
 import queue
 import re
+import socket
 import subprocess
 import sys
 import threading
+import time
+import urllib.request
 from pathlib import Path
 
+FROZEN = bool(getattr(sys, "frozen", False))
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 APP_URL_RE = re.compile(r"App running at: (http://\S+)")
@@ -84,19 +89,15 @@ def _run_reflex_inplace(extra_args: list[str]) -> None:
 OLLAMA_PID_RE = re.compile(r"OLLAMA_SERVER_PID:(\d+)")
 
 
-def _start_server(extra_args: list[str]) -> tuple[subprocess.Popen, "queue.Queue[str]", dict]:
-    """Підняти сервер як дочірній процес (python main.py --dev ...). Фоновий
-    потік читає його stdout: друкує кожен рядок (логи лишаються видимі в
-    консолі), виловлює рядок "App running at: <url>" із РЕАЛЬНИМ портом і
-    рядок "OLLAMA_SERVER_PID:<pid>" (agent.llm._ensure_server) — щоб мати PID
-    Ollama-сервера й завершити його при виході (лише якщо ЦЕЙ запуск його й
-    підняв; srv_state["ollama_pid"] лишається None, якщо Ollama вже працював)."""
+def _start_proc(cmd: list[str], cwd: str | None = None) -> tuple[subprocess.Popen, "queue.Queue[str]", dict]:
+    """Підняти дочірній процес. Фоновий потік читає його stdout: друкує кожен рядок
+    (лог лишається видимий у консолі), пише його в igor-server.log, виловлює рядок
+    "App running at: <url>" (dev) і "OLLAMA_SERVER_PID:<pid>" (agent.llm._ensure_server) —
+    щоб завершити Ollama при виході, але лише якщо ЦЕЙ запуск її й підняв."""
     env = {**os.environ, "REFLEX_TELEMETRY_ENABLED": "false", "PYTHONIOENCODING": "utf-8"}
-    proc = subprocess.Popen(
-        [sys.executable, str(ROOT / "main.py"), "--dev", *extra_args],
-        cwd=str(ROOT), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-        text=True, bufsize=1,
-    )
+    proc = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                            text=True, encoding="utf-8", errors="replace", bufsize=1,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     url_q: "queue.Queue[str]" = queue.Queue(maxsize=1)
     srv_state: dict = {"ollama_pid": None}
     found = False
@@ -109,7 +110,10 @@ def _start_server(extra_args: list[str]) -> tuple[subprocess.Popen, "queue.Queue
     def _pump() -> None:
         nonlocal found
         for line in proc.stdout:
-            print(line, end="")
+            try:
+                print(line, end="")
+            except Exception:                     # консолі може не бути (windowed .exe)
+                pass
             if srv_log:
                 srv_log.info(line.rstrip())
             if not found:
@@ -127,6 +131,11 @@ def _start_server(extra_args: list[str]) -> tuple[subprocess.Popen, "queue.Queue
     return proc, url_q, srv_state
 
 
+def _start_server(extra_args: list[str]):
+    """dev: `python main.py --dev ...` у дочірньому процесі."""
+    return _start_proc([sys.executable, str(ROOT / "main.py"), "--dev", *extra_args], cwd=str(ROOT))
+
+
 def _kill_tree(pid: int) -> None:
     """Завершити процес РАЗОМ з усім його деревом дочірніх процесів (Windows:
     taskkill /T). Звичайний proc.terminate()/kill() вбиває лише ОДИН PID — Reflex
@@ -135,7 +144,8 @@ def _kill_tree(pid: int) -> None:
     закриття застосунку, навіть коли консоль уже сказала "Process finished")."""
     try:
         subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except Exception:
         pass
 
@@ -157,10 +167,94 @@ def _stop_ollama(pid: int | None) -> None:
         _kill_tree(pid)
 
 
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def _wait_ping(port: int, proc: subprocess.Popen, timeout: float = STARTUP_TIMEOUT) -> bool:
+    """Чекати, поки бекенд відповість на /ping (або процес помре)."""
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            return False
+        try:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/ping", timeout=2) as r:
+                if r.status == 200:
+                    return True
+        except Exception:
+            time.sleep(0.4)
+    return False
+
+
+def _open_window(url: str, log) -> None:
+    import webview
+    geo = _load_geometry()
+    # text_select=False — дефолт pywebview, забороняє виділення/копіювання
+    # тексту в усьому вікні (живий кейс: текст у чаті неможливо було виділити).
+    window = webview.create_window(
+        "Ігорь!", url, width=geo["width"], height=geo["height"],
+        x=geo.get("x"), y=geo.get("y"), min_size=(800, 600), text_select=True,
+    )
+    # closing — синхронна подія (блокує закриття до завершення хендлера),
+    # тож геометрія читається ДО того, як вікно (і його властивості) зникне.
+    window.events.closing += lambda: _save_geometry(window)
+    webview.start()
+    log.info("вікно закрито користувачем")
+
+
+def _show_error(text: str) -> None:
+    """Повідомлення користувачеві, коли консолі немає (.exe без консолі)."""
+    try:
+        import ctypes
+        ctypes.windll.user32.MessageBoxW(0, text, "Ігорь!", 0x10)
+    except Exception:
+        print(text)
+
+
+def _run_prod(no_window: bool) -> None:
+    """Режим без Node/Bun (і готового .exe): бекенд зі статикою на вільному порту."""
+    from agent import logs
+    log = logs.setup("igor-launcher")
+    port = _free_port()
+    cmd = ([sys.executable, "--serve", str(port)] if FROZEN
+           else [sys.executable, str(ROOT / "main.py"), "--serve", str(port)])
+    log.info("запуск (prod), порт=%d, frozen=%s", port, FROZEN)
+    proc, _q, srv_state = _start_proc(cmd, cwd=None if FROZEN else str(ROOT))
+    try:
+        if not _wait_ping(port, proc):
+            log.error("бекенд не відповів за %.0fс (код виходу=%s)", STARTUP_TIMEOUT, proc.poll())
+            _show_error("Сервер Ігоря не запустився. Логи: %USERPROFILE%\\.local-code-agent\\logs\\ "
+                        "(igor-server.log, igor-launcher.log).")
+            return
+        url = f"http://127.0.0.1:{port}"
+        log.info("сервер піднявся: %s", url)
+        if no_window:
+            print(f"URL: {url}", flush=True)
+            proc.wait()
+        else:
+            _open_window(url, log)
+    except Exception:
+        log.exception("збій лаунчера")
+        raise
+    finally:
+        log.info("зупиняю сервер (код виходу=%s)", proc.poll())
+        _stop_server(proc)
+        _stop_ollama(srv_state.get("ollama_pid"))
+
+
 def main() -> None:
     extra = sys.argv[1:]
+    if "--serve" in extra:                          # внутрішній режим: бекенд зі статикою
+        from agent import serve
+        serve.serve(int(extra[extra.index("--serve") + 1]))
+        return
     if "--dev" in extra:
         _run_reflex_inplace([a for a in extra if a != "--dev"])
+        return
+    if FROZEN or "--prod" in extra:
+        _run_prod(no_window="--no-window" in extra)
         return
 
     if "--backend-port" not in extra:
@@ -179,19 +273,7 @@ def main() -> None:
             print(f"Сервер не повідомив URL за {STARTUP_TIMEOUT:.0f}с — дивіться лог вище.")
             return
         log.info("сервер піднявся: %s", url)
-        import webview
-        geo = _load_geometry()
-        # text_select=False — дефолт pywebview, забороняє виділення/копіювання
-        # тексту в усьому вікні (живий кейс: текст у чаті неможливо було виділити).
-        window = webview.create_window(
-            "Ігорь!", url, width=geo["width"], height=geo["height"],
-            x=geo.get("x"), y=geo.get("y"), min_size=(800, 600), text_select=True,
-        )
-        # closing — синхронна подія (блокує закриття до завершення хендлера),
-        # тож геометрія читається ДО того, як вікно (і його властивості) зникне.
-        window.events.closing += lambda: _save_geometry(window)
-        webview.start()
-        log.info("вікно закрито користувачем")
+        _open_window(url, log)
     except Exception:
         log.exception("збій лаунчера")
         raise
@@ -202,4 +284,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    multiprocessing.freeze_support()     # обов'язково для .exe: воркери Granian запускаються через spawn
     main()

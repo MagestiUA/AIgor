@@ -10,7 +10,8 @@ from pathlib import Path
 def _git(root: Path, *args: str, timeout: float = 4.0) -> str | None:
     try:
         p = subprocess.run(["git", "-C", str(root), *args], capture_output=True, text=True,
-                           encoding="utf-8", errors="replace", timeout=timeout)
+                           encoding="utf-8", errors="replace", timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
     except (OSError, subprocess.SubprocessError):
         return None
     return p.stdout if p.returncode == 0 else None

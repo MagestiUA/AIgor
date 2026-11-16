@@ -298,6 +298,7 @@ class State(rx.State):
             rows.append({"label": "Бекенд", "value": "локально (Ollama)"})
             rows.append({"label": "Модель", "value": config.MODEL})
         rows.append({"label": "Режим", "value": "Чат" if self.mode == "chat" else "Код"})
+        rows.append({"label": "Версія", "value": logs.app_version()})
         if self.mode == "code":
             rows.append({"label": "Правки / консоль", "value": f"{self.edits} / {self.shell}"})
             if self.git_branch:
