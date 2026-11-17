@@ -2454,7 +2454,7 @@ def sidebar() -> rx.Component:
             class_name="self-start mb-2 ml-1 rounded-full hover:bg-white/10 text-gray-400",
         ),
         direction="column",
-        class_name="w-64 h-full p-2 gap-0.5",
+        class_name="w-64 max-[900px]:w-48 shrink-0 h-full p-2 gap-0.5",
         style={"backgroundColor": PANEL, "borderRight": "1px solid rgba(255,255,255,0.08)"},
     )
 
@@ -2525,7 +2525,7 @@ def _code_controls() -> rx.Component:
             ),
             class_name="items-center gap-1",
         ),
-        class_name="items-center gap-2",
+        class_name="items-center gap-2 flex-wrap",
     )
 
 
@@ -2615,7 +2615,7 @@ def controls_bar() -> rx.Component:
                 size="1", radius="full", class_name="bg-white text-black ml-1",
             ),
         ),
-        class_name="w-full items-center mt-2 gap-2",
+        class_name="w-full items-center mt-2 gap-2 flex-wrap",
     )
 
 
@@ -2866,7 +2866,7 @@ def chat_view() -> rx.Component:
         rx.cond(State.has_question, question_bar(), rx.fragment()),
         id="chat-scroll",
         on_mount=rx.call_script(SCROLL_SETUP_JS),
-        class_name="w-full flex-1 overflow-y-auto overflow-x-hidden min-w-0 px-[1cm] py-6 gap-3",
+        class_name="w-full flex-1 overflow-y-auto overflow-x-hidden min-w-0 px-4 min-[900px]:px-[1cm] py-6 gap-3",
         # scrollbar-gutter: stable — скролбар завжди резервує місце праворуч, тож ширина
         # контенту стабільна; поле вводу компенсує ту саму ширину через --sbw (нижче).
         style={"fontSize": State.chat_font_px, "scrollbarGutter": "stable"},
@@ -3008,9 +3008,10 @@ def main_area() -> rx.Component:
                 input_box(),
                 # Праворуч додаємо ширину скролбара (--sbw), щоб рамка поля вводу
                 # збігалася з правим краєм відповіді (чат має скролбар, інпут — ні).
-                class_name="w-full pl-[1cm] pr-[calc(1cm+var(--sbw,0px))] pb-4 relative",
+                class_name="w-full min-w-0 pl-4 pr-[calc(1rem+var(--sbw,0px))] "
+                           "min-[900px]:pl-[1cm] min-[900px]:pr-[calc(1cm+var(--sbw,0px))] pb-4 relative",
             ),
-            class_name="flex-1 h-full w-full relative",
+            class_name="flex-1 h-full w-full min-w-0 relative",
         ),
         rx.center(
             rx.vstack(
@@ -3022,7 +3023,7 @@ def main_area() -> rx.Component:
                 spacing="5",
                 class_name="w-full max-w-2xl items-center px-4",
             ),
-            class_name="flex-1 h-full",
+            class_name="flex-1 h-full min-w-0",
         ),
     )
 

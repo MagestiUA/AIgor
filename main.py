@@ -41,6 +41,7 @@ STARTUP_TIMEOUT = 60.0
 # існує (WSL2/Hyper-V NAT-артефакт). Не ліземо в WSL/Docker — просто стартуємо
 # на іншому, вільному порту за дефолтом. Перекривається власним --backend-port.
 DEFAULT_BACKEND_PORT = 8006
+MIN_WINDOW = (640, 480)      # верстка (lca_web) перевірена до ~600 px: сайдбар вужчає, контроли переносяться
 
 # Геометрія вікна — окремий файл від agent/settings.py (тема/шрифти), щоб два
 # процеси (цей лаунчер і Reflex-бекенд) не затирали одне одному ключі: main.py
@@ -56,8 +57,8 @@ def _load_geometry() -> dict:
         geo = {**DEFAULT_GEOMETRY, **d}
         # Захист від сміттєвої збереженої геометрії (напр. зі звуженого/
         # мінімізованого стану) — не менше за min_size вікна.
-        geo["width"] = max(800, int(geo.get("width") or DEFAULT_GEOMETRY["width"]))
-        geo["height"] = max(600, int(geo.get("height") or DEFAULT_GEOMETRY["height"]))
+        geo["width"] = max(MIN_WINDOW[0], int(geo.get("width") or DEFAULT_GEOMETRY["width"]))
+        geo["height"] = max(MIN_WINDOW[1], int(geo.get("height") or DEFAULT_GEOMETRY["height"]))
         return geo
     except Exception:
         return dict(DEFAULT_GEOMETRY)
@@ -196,7 +197,7 @@ def _open_window(url: str, log) -> None:
     from agent import logs as _logs
     window = webview.create_window(
         f"Ігорь! · {_logs.app_version()}", url, width=geo["width"], height=geo["height"],
-        x=geo.get("x"), y=geo.get("y"), min_size=(800, 600), text_select=True,
+        x=geo.get("x"), y=geo.get("y"), min_size=MIN_WINDOW, text_select=True,
     )
     # closing — синхронна подія (блокує закриття до завершення хендлера),
     # тож геометрія читається ДО того, як вікно (і його властивості) зникне.
