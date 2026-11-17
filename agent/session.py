@@ -29,7 +29,8 @@ class Session:
     init_scan: bool = False
     plan_first: bool = False                              # завжди планувати наперед
     reference_files: list = field(default_factory=list)   # read-only джерела (абс. шляхи)
-    pending_plan: dict | None = None                      # план, що очікує виконання
+    extra_dirs: list = field(default_factory=list)        # додаткові теки проєкту (абс. шляхи, читання+запис)
+    pending_plan: dict | None = None                    # план, що очікує виконання
     pending_question: dict | None = None                  # питання планувальника, що очікує відповіді
     context_summary: str = ""                             # стислий підсумок розмови (контекст-памʼять)
     topics: list = field(default_factory=list)            # назви тем (chat), що траплялись у цій сесії

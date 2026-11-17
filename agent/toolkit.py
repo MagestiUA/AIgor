@@ -30,6 +30,7 @@ class ToolContext:
     attachments: list = field(default_factory=list)   # метадані вкладень (без вмісту)
     attachments_dir: Path | None = None  # тека з файлами вкладень сесії (для read_attachment)
     track_project: bool = False          # оновлювати «Карту проєкту» при read/write (код-режим)
+    extra_roots: list = field(default_factory=list)   # додаткові теки проєкту: читання/запис за абсолютним шляхом
 
 
 @dataclass
@@ -91,6 +92,9 @@ def _track_project(name: str, args: dict, out: str, ctx) -> None:
         from . import activity, projectmap
         if not activity.result_ok(out):
             return
+        pth = args.get("path") or args.get("target")
+        if pth and not _under_root(ctx, pth):             # файл у додатковій теці — не в карті цього проєкту
+            return
         if name == "read_file" and args.get("path"):
             projectmap.mark_read(ctx.root, args["path"])
         elif name in ("write_file", "edit_file") and args.get("path"):
@@ -110,7 +114,9 @@ def h_project_note(args, ctx):
     p = _resolve(ctx, rel)
     if not p.is_file():
         return f"файл не знайдено: {rel}"
-    ok = projectmap.set_note(ctx.root, str(p.relative_to(ctx.root.resolve())), note)
+    if not _under_root(ctx, str(p)):
+        return "нотатки в карті проєкту ведуться лише для файлів головної теки"
+    ok =projectmap.set_note(ctx.root, str(p.relative_to(ctx.root.resolve())), note)
     return "нотатку збережено в карті проєкту" if ok else "не вдалось зберегти нотатку"
 
 
@@ -123,9 +129,21 @@ def _resolve(ctx: ToolContext, path: str) -> Path:
     root = ctx.root.resolve()
     p = Path(path)
     full = (p if p.is_absolute() else root / p).resolve()
-    if full != root and root not in full.parents:
-        raise ValueError(f"шлях поза межами проєкту заборонено: {path}")
-    return full
+    for base in [root, *(Path(x).resolve() for x in ctx.extra_roots)]:     # корінь + додані теки
+        if full == base or base in full.parents:
+            return full
+    raise ValueError(f"шлях поза межами проєкту заборонено: {path}")
+
+
+def _under_root(ctx: ToolContext, path: str) -> bool:
+    """Файл лежить у ГОЛОВНІЙ теці проєкту (карта проєкту ведеться лише для неї)."""
+    try:
+        root = ctx.root.resolve()
+        p = Path(path)
+        full = (p if p.is_absolute() else root / p).resolve()
+        return full == root or root in full.parents
+    except (OSError, ValueError):
+        return False
 
 
 def h_list_dir(args, ctx):

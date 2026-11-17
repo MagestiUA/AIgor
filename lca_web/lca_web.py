@@ -169,6 +169,10 @@ class State(rx.State):
     shell: str = "smart"
     plan_first: bool = False
     references: list[str] = []
+    extra_dirs: list[str] = []             # додаткові теки проєкту (читання+запис, абс. шляхи)
+    extra_input: str = ""
+    extra_error: str = ""
+    extra_open: bool = False
     folder_input: str = ""
     ref_input: str = ""
     task: str = ""
@@ -351,6 +355,9 @@ class State(rx.State):
             pr = CP.load_project(self.chat_project_id)
             if pr:
                 rows.append({"name": pr.name, "path": "проєкт чату (інструкції)", "tag": "проєкт"})
+        if self.mode == "code":
+            for d in self.extra_dirs:
+                rows.append({"name": Path(d).name or d, "path": d, "tag": "додаткова тека"})
         for r in self.references:
             rows.append({"name": Path(r).name, "path": r, "tag": "джерело"})
         _ = self.attachments                                  # перерахунок при зміні вкладень
@@ -473,6 +480,7 @@ class State(rx.State):
         self.project_root = ""
         self.messages = []
         self.references = []
+        self.extra_dirs = []
         self.has_pending = False
         self.queued_text = ""
         self.context_summary = ""
@@ -549,6 +557,7 @@ class State(rx.State):
         self.shell = s.permissions.get("shell", "smart")
         self.plan_first = s.plan_first
         self.references = list(s.reference_files)
+        self.extra_dirs = list(s.extra_dirs)
         self.messages = [{"thinking": "", "attachments": [], **m} for m in s.messages]
         self.has_pending = s.pending_plan is not None
         self.context_summary = s.context_summary
@@ -598,6 +607,7 @@ class State(rx.State):
         s.permissions = {"edits": self.edits, "shell": self.shell}
         s.plan_first = self.plan_first
         s.reference_files = [str(x) for x in self.references]   # розгорнути проксі
+        s.extra_dirs = [str(x) for x in self.extra_dirs]
         sess.save_session(s)
         self.sessions = sess.list_sessions()
 
@@ -930,6 +940,60 @@ class State(rx.State):
         self.references = [x for x in self.references if x != r]
         self._save_current()
 
+    @rx.event
+    def set_extra_input(self, v: str):
+        self.extra_input = v
+        self.extra_error = ""
+
+    @rx.event
+    def set_extra_open(self, v: bool):
+        self.extra_open = v
+        if v:
+            self.extra_error = ""
+
+    @rx.event
+    def add_extra_dir(self):
+        """Додати ще одну теку до проєкту: агент читає й пише в ній за абсолютним шляхом
+        (сценарій «скопіювати проєкт у нову теку й далі працювати там»). Якщо теки ще нема — створюємо."""
+        raw = self.extra_input.strip().strip('"')
+        self.extra_error = ""
+        if not raw:
+            return
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            self.extra_error = "потрібен абсолютний шлях"
+            return
+        if p.exists() and not p.is_dir():
+            self.extra_error = "це файл, а не тека (файли — у «джерелах»)"
+            return
+        if not p.exists():
+            try:
+                p.mkdir(parents=True)                  # нова тека для копії проєкту
+            except OSError as e:
+                self.extra_error = f"не вдалося створити теку: {e}"
+                return
+        s = str(p.resolve())
+        same = self.project_root and Path(self.project_root).resolve() == Path(s)
+        if same or s in self.extra_dirs:
+            self.extra_error = "ця тека вже додана"
+            return
+        self.extra_dirs = self.extra_dirs + [s]
+        self.extra_input = ""
+        self.extra_open = False
+        self._save_current()
+
+    @rx.event
+    def remove_extra_dir(self, d: str):
+        self.extra_dirs = [x for x in self.extra_dirs if x != d]
+        self._save_current()
+
+    def _roots_note(self) -> str:
+        """Рядок для контексту моделі: які ще теки доступні (порожній, якщо їх нема)."""
+        if not self.extra_dirs:
+            return ""
+        return ("Додаткові теки проєкту (читай і пиши в них за АБСОЛЮТНИМ шляхом; відносні шляхи рахуються від "
+                "кореня проєкту): " + "; ".join(str(x) for x in self.extra_dirs) + "\n")
+
     async def _confirm_async(self, text: str) -> bool:
         """Показати діалог підтвердження З КОНТЕКСТУ background-події (через `async with
         self`, тож дельта confirm_open реально доходить до фронта — на відміну від
@@ -953,7 +1017,7 @@ class State(rx.State):
         """Контекст кроку: загальна задача + ПОВНИЙ план із результатами вже виконаних кроків
         і змінених файлів (render_for_planner) — кроки бачать, що зробили попередні, а не
         лише галочки. Підсумок розмови та вкладення — як і раніше."""
-        ctx = (f"Project root: {root}\n\nЗагальна задача: {plan.task}\n"
+        ctx = (f"Project root: {root}\n{self._roots_note()}\nЗагальна задача: {plan.task}\n"
                f"План і результати вже виконаних кроків (ти виконуєш ЛИШЕ крок #{step.id}):\n"
                f"{render_for_planner(plan)}")
         pmap = projectmap.context_block(root)             # свіжа: попередній крок міг змінити файли
@@ -1100,7 +1164,8 @@ class State(rx.State):
         return ToolContext(root=Path(root),
                            permissions={"edits": "auto", "shell": self.shell},
                            client=client, confirm=None,
-                           attachments_dir=A.session_dir(self.current_id), track_project=True)
+                           attachments_dir=A.session_dir(self.current_id), track_project=True,
+                           extra_roots=[Path(x) for x in self.extra_dirs])
 
     async def _dispatch_tool(self, reg, name: str, args: dict, ctx: ToolContext) -> str:
         """Виконати тул + показати подію в живій стрічці («що виконує і який результат»)."""
@@ -1641,7 +1706,8 @@ class State(rx.State):
             cur_atts = list(self.messages[-1].get("attachments", []) or []) if self.messages else []
         tctx = ToolContext(root=Path(root) if root else Path.home(),
                            permissions={"edits": "off", "shell": "off"}, client=client,
-                           attachments_dir=A.session_dir(cid), track_project=bool(root))
+                           attachments_dir=A.session_dir(cid), track_project=bool(root),
+                           extra_roots=[Path(x) for x in self.extra_dirs])
         all_names = [n["name"] for n in A.list_saved(cid)]
         other_names = [n for n in all_names if n not in cur_atts]
         # cur_atts малі сумарно -> вшиваємо вмістом напряму (менше тул-раундів);
@@ -1927,8 +1993,9 @@ class State(rx.State):
                 async with self:
                     self.status = "Виконую запит…"
                 ctx = self._exec_ctx(root, client)
-                shell_ctx = (f"Project root: {root}\n{pmap}{convo.as_context(summary)}" if summary
-                             else f"Project root: {root}\n{pmap}")
+                rn = self._roots_note()
+                shell_ctx = (f"Project root: {root}\n{rn}{pmap}{convo.as_context(summary)}" if summary
+                             else f"Project root: {root}\n{rn}{pmap}")
                 if att_note:
                     shell_ctx += "\n" + att_note
                 final, _ = await self._run_tool_step(text, ctx, context=shell_ctx,
@@ -2619,6 +2686,52 @@ def controls_bar() -> rx.Component:
     )
 
 
+def extra_dir_dialog() -> rx.Component:
+    return rx.dialog.root(
+        rx.dialog.trigger(
+            rx.button(rx.icon("plus", size=12), "тека", type="button", variant="ghost",
+                      size="1", class_name="text-gray-400"),
+        ),
+        rx.dialog.content(
+            rx.dialog.title("Додаткова тека проєкту"),
+            rx.dialog.description(
+                "Агент зможе читати й писати в цій теці (за абсолютним шляхом). Якщо теки ще нема — "
+                "її буде створено: наприклад, щоб скопіювати туди проєкт і працювати далі в копії.",
+                class_name="text-xs text-gray-400",
+            ),
+            rx.input(placeholder="Абсолютний шлях до теки",
+                     value=State.extra_input, on_change=State.set_extra_input,
+                     class_name="w-full mt-2"),
+            rx.cond(State.extra_error != "",
+                    rx.text(State.extra_error, class_name="text-xs text-red-400 mt-1"), rx.fragment()),
+            rx.flex(
+                rx.dialog.close(rx.button("Скасувати", variant="soft")),
+                rx.button("Додати", on_click=State.add_extra_dir),
+                spacing="2", justify="end", class_name="mt-3",
+            ),
+        ),
+        open=State.extra_open, on_open_change=State.set_extra_open,
+    )
+
+
+def extra_dirs_row() -> rx.Component:
+    return rx.hstack(
+        rx.icon("folder-plus", size=12, class_name="text-gray-500"),
+        rx.text("теки:", class_name="text-xs text-gray-500"),
+        rx.foreach(
+            State.extra_dirs,
+            lambda d: rx.hstack(
+                rx.text(d, class_name="text-xs text-gray-300 truncate max-w-48", title=d),
+                rx.icon("x", size=11, class_name="text-gray-500 cursor-pointer",
+                        on_click=lambda: State.remove_extra_dir(d)),
+                class_name="items-center gap-1 px-1.5 py-0.5 rounded bg-white/5",
+            ),
+        ),
+        extra_dir_dialog(),
+        class_name="items-center gap-2 mt-1 flex-wrap",
+    )
+
+
 def references_row() -> rx.Component:
     return rx.hstack(
         rx.icon("lock", size=12, class_name="text-gray-500"),
@@ -2677,7 +2790,7 @@ def input_box() -> rx.Component:
                     rows="2",
                 ),
                 controls_bar(),
-                rx.cond(State.is_chat, rx.fragment(), references_row()),
+                rx.cond(State.is_chat, rx.fragment(), rx.fragment(extra_dirs_row(), references_row())),
                 attachment_chips(),
                 class_name="w-full rounded-2xl p-3 border " + BORDER,
                 style={"backgroundColor": INPUT},
