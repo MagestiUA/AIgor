@@ -12,7 +12,7 @@ from pathlib import Path
 from agent import updater
 
 NEW_BODY = (b"@echo off\r\necho started pyi=[%_PYI_APPLICATION_HOME_DIR%] mei=[%_MEIPASS2%] reset=[%PYINSTALLER_RESET_ENVIRONMENT%]"
-            b"> \"%~dp0marker.txt\"\r\n" + b"REM padding\r\n" * 5000)
+            b"> \"%~dp0marker.txt\"\r\n" + b"REM padding\r\n" * 5000 + b"exit\r\n")   # exit: `start` відкриває для .cmd консоль /K
 GOOD_SHA = hashlib.sha256(NEW_BODY).hexdigest()
 STATE = {"sha": GOOD_SHA, "release": 200}
 
