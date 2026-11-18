@@ -14,6 +14,9 @@
      кроці, а різних дій ≤4 (ловить цикли, де результат трохи «плаває», напр. 96/101 символів, або
      короткі відповіді типу "[]" чергуються з довшими — C цього не бачить).
 
+  E) діагностика b_0.0.19: 3 команди по колу ~26 хв, результати щоразу трохи інші (хеші різні) — A–D не
+     спрацювали. Тепер: повне вікно з 24 викликів, у якому лише ≤3 різні дії (цифри в аргументах ігноруємо).
+
 Реакція у два етапи: перше виявлення → «warn» (caller додає модель-підказку змінити
 підхід або пояснити блокер); повторне ПІСЛЯ підказки → «stop» (крок зупиняється з
 поясненням причини). Після warn історія скидається, тож для stop потрібні свіжі докази.
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 
 MIN_RESULT_LEN = 12          # коротші результати ("rc=0", "ok") можуть збігатися законно
 WINDOW = 24
@@ -53,6 +57,7 @@ def _h(result: str) -> str:
 class LoopGuard:
     def __init__(self) -> None:
         self.calls: list[tuple[str, str, int, bool]] = []   # (sig, result_hash, result_len, новий_результат)
+        self.nsigs: list[str] = []                      # дії без чисел (для E), паралельно з calls
         self.seen: set[str] = set()                     # усі результати цього кроку (не скидається на warn)
         self.warned = False
         self.last_result = ""
@@ -62,8 +67,11 @@ class LoopGuard:
             return
         h = _h(result)
         self.calls.append((_sig(name, args), h, len(result or ""), h not in self.seen))
+        sg = _sig(name, args)
+        self.nsigs.append(re.sub(r"\d+", "#", sg) if name == "run_shell" else sg)   # цифри ігноруємо лише в командах
         self.seen.add(h)
         self.calls = self.calls[-WINDOW:]
+        self.nsigs = self.nsigs[-WINDOW:]
         self.last_result = result or ""
 
     def _repeated(self) -> str | None:
@@ -90,6 +98,10 @@ class LoopGuard:
             t = c[-NOVELTY_WINDOW:]
             if not any(novel for _, _, _, novel in t) and len({s for s, _, _, _ in t}) <= 4:
                 return f"останні {NOVELTY_WINDOW} викликів не дали жодного нового результату"
+        # E: повне вікно викликів складається лише з 1–3 різних дій (числа в аргументах не рахуємо), хай які
+        #    результати: вивід «плаває» (час, лічильники), тож A–D його не бачать, але агент крутить те саме
+        if len(self.nsigs) >= WINDOW and len(set(self.nsigs)) <= 3:
+            return f"останні {WINDOW} викликів — лише {len(set(self.nsigs))} різні дії, що повторюються"
         return None
 
     def check(self) -> tuple[str, str] | None:
@@ -100,6 +112,7 @@ class LoopGuard:
         if not self.warned:
             self.warned = True
             self.calls.clear()                          # свіжі докази потрібні для stop
+            self.nsigs.clear()
             return ("warn", reason)
         return ("stop", reason)
 

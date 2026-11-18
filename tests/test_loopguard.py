@@ -74,9 +74,27 @@ def main() -> None:
     first = next(i for i, x in enumerate(v) if x)
     assert first <= 16, first                      # ловимо за хвилину, а не після 700 викликів
 
-    # 9) а нові результати (справжній прогрес) D не зупиняє, навіть коли дій мало
+    # 9) а нові результати (справжній прогрес) D не зупиняє, навіть коли дій мало (але менше за вікно E)
     g = LoopGuard()
-    v = feed(g, [("run_shell", {"command": "git log -1"}, f"commit {i:03d} message") for i in range(40)])
+    v = feed(g, [("run_shell", {"command": "git log -1"}, f"commit {i:03d} message") for i in range(20)])
+    assert all(x is None for x in v)
+
+    # 11) E (діагностика b_0.0.19): 3 команди по колу, результати щоразу інші (час/лічильники) — A–D сліпі
+    g = LoopGuard()
+    cyc = []
+    for i in range(30):
+        cyc += [("run_shell", {"command": "adb logcat -d | findstr x"}, f"рядок логу {i} " * (3 + i % 5)),
+                ("run_shell", {"command": f"ping -n {i % 4 + 1} host"}, f"відповідь {i * 7} мс, випадковий хвіст {i}"),
+                ("run_shell", {"command": "tasklist"}, f"процес {i}, пам'ять {i * 31} КБ, вивід плаває")]
+    v = feed(g, cyc)
+    kinds = [x[0] for x in v if x]
+    assert kinds[:2] == ["warn", "stop"], kinds
+    assert "різні дії" in next(x[1] for x in v if x)
+    assert next(i for i, x in enumerate(v) if x) <= 24
+
+    # 12) різноманітна довга робота (≥4 різних дій у вікні) E не чіпає
+    g = LoopGuard()
+    v = feed(g, [("run_shell", {"command": f"cmd_{'abcdef'[i % 6]}"}, f"вивід {i} унікальний " * 2) for i in range(120)])
     assert all(x is None for x in v)
 
     # 10) project_note — службовий тул: підряд однакові відповіді не вважаються зацикленням
