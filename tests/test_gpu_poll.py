@@ -46,6 +46,15 @@ async def collect(st, timeout):
 
 
 def main() -> None:
+    # за замовчуванням увімкнено: і в налаштуваннях (нові/старі профілі без ключа), і в стані; явне «вимкнено» читається
+    from agent import settings
+    assert settings.DEFAULT["gpu_monitor"] is True and settings.DEFAULT["gpu_monitor_port"] == "8001"
+    assert W.State.get_fields()["gpu_enabled"].default is True
+    assert {**settings.DEFAULT, **{}}.get("gpu_monitor", True) is True and {**settings.DEFAULT, "gpu_monitor": False}["gpu_monitor"] is False
+    # недоступні дані: підказка-заглушка замість графіка й приховування картки для «не серверного бекенду» — у скрипті картки
+    assert "Дані навантаження GPU недоступні" in W.GPU_JS and "v.state === 'na' ? 'none' : 'flex'" in W.GPU_JS
+    assert "gpu-graph" in W.GPU_JS and "v.state === 'ok' ? '' : 'none'" in W.GPU_JS                 # графік лише при state=ok
+
     real = (gpumon.fetch, backend.resolve, W.GPU_POLL_S, os.environ.get(config.REMOTE_KEY_ENV))
     calls = []
     try:

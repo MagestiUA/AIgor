@@ -206,7 +206,9 @@ GPU_JS = r"""
     if (!last) return;
     var v = last.v || {};
     txt('gpu-status', v.status); txt('gpu-util', v.util); txt('gpu-line', v.temp_power); txt('gpu-vram', v.vram);
-    txt('gpu-model', v.model); txt('gpu-hint', v.state === 'ok' ? '' : v.hint);
+    txt('gpu-model', v.model);
+    txt('gpu-hint', v.state === 'ok' ? '' : 'Дані навантаження GPU недоступні' + (v.hint ? ' — ' + v.hint : ''));
+    var card = el('gpu-card'); if (card) card.style.display = v.state === 'na' ? 'none' : 'flex';   // 'flex': початковий none сидить у CSS-класі, '' його не знімає
     var colors = {ok: '#22c55e', wait: '#f59e0b', na: '#6b7280'};
     var dot = el('gpu-dot'); if (dot) dot.style.backgroundColor = colors[v.state] || '#ef4444';
     var u = el('gpu-util'); if (u) u.style.color = v.state === 'ok' ? '#7dd3fc' : '';
@@ -314,8 +316,8 @@ class State(rx.State):
     update_busy: bool = False              # іде перевірка або завантаження
     update_dismissed: bool = False         # банер закрито до наступного запуску
     # Навантаження GPU сервера (agent/gpumon.py): вмикається в Налаштуваннях, показується зверху правої панелі
-    gpu_enabled: bool = False
-    gpu_port: str = "8001"                 # порт агента моніторингу на сервері
+    gpu_enabled: bool = True               # за замовчуванням увімкнено (agent/settings.py); явне «вимкнено» зберігається
+    gpu_port: str = "8001"                # порт агента моніторингу на сервері
     # Самі показники GPU у стані НЕ зберігаються: бекенд пушить їх скриптом (window.__igorGpu) прямо в DOM картки,
     # тож оновлення раз на 10 с не змінює жодної змінної стану й не перемальовує React-інтерфейс (ввід не підвисає).
     _update_info: dict = {}                # відповідь updater.check (backend-only: з URL-ами ресурсів)
@@ -895,7 +897,7 @@ class State(rx.State):
         self.llm_backend = eff["backend"]
         self.llm_model = d.get("llm_model", "")
         self.llm_key_saved = bool(d.get("llm_api_key"))
-        self.gpu_enabled = bool(d.get("gpu_monitor", False))
+        self.gpu_enabled = bool(d.get("gpu_monitor", True))
         self.gpu_port = str(d.get("gpu_monitor_port") or "8001")
         self.llm_host, self.llm_port = d.get("llm_host", ""), str(d.get("llm_port", ""))
         if not self.llm_host and eff["backend"] == "openai":      # дефолт із .env/config
@@ -2754,7 +2756,8 @@ def gpu_settings_section() -> rx.Component:
         rx.text("Якщо на сервері піднято сумісний агент моніторингу навантаження: раз на 10 с Ігорь читає "
                 "GET /metrics.json (той самий ключ, що й для моделі) і показує зверху правої панелі, чи "
                 "відповідає сервер та навантаження ГПУ (завантаження, Вт, температура, VRAM). Адреса сервера — "
-                "з підключення до LLM; працює лише з бекендом «Сервер (OpenAI API)».",
+                "з підключення до LLM; працює лише з бекендом «Сервер (OpenAI API)». Увімкнено за замовчуванням; "
+                "якщо агента нема, замість графіка буде напис «Дані навантаження GPU недоступні».",
                 class_name="text-xs text-gray-500"),
         rx.cond(State.gpu_enabled,
                 rx.hstack(rx.text("Порт агента", class_name="text-sm text-gray-300 w-24 shrink-0"),
@@ -3517,7 +3520,10 @@ def gpu_card() -> rx.Component:
         rx.text("", id="gpu-hint", class_name="text-xs text-gray-500"),
         gap="2", class_name="w-full",
         on_mount=rx.call_script("window.__igorGpuRender&&window.__igorGpuRender()"))   # картку могли перемонтувати
-    return rx.cond(State.gpu_enabled, _section("Сервер", body), rx.fragment())
+    # Початково прихована: JS (GPU_JS) показує картку, коли прийшли дані/стан сервера, і ховає для локальної Ollama
+    # та «не налаштовано» — там монітора немає, і порожня картка була б шумом.
+    return rx.cond(State.gpu_enabled, _section("Сервер", body, id="gpu-card", style={"display": "none"}),
+                   rx.fragment())
 
 
 def context_panel() -> rx.Component:

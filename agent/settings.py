@@ -13,6 +13,9 @@ DEFAULT = {
     "llm_port": "",
     "llm_api_key": "",         # лежить у файлі користувача відкритим текстом
     "llm_model": "",           # "" = перша модель із /v1/models
+    # Навантаження GPU сервера (agent/gpumon.py): за замовчуванням увімкнено; недоступні дані — без графіка
+    "gpu_monitor": True,
+    "gpu_monitor_port": "8001",
 }
 
 def load() -> dict:
