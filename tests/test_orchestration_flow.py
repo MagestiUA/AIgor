@@ -28,10 +28,20 @@ class FakeState:
         self.pending_saved = None
         self.has_pending = False
         self._step_touched: list = []
+        self._step_actions: list = []
         self.step_contexts: list[str] = []
         self.run_log: list[tuple[str, str]] = []
+        self.planner = None            # заглушка моделі-планувальника; None → перегляд плану нейтральний («далі»)
         for name in ("_step_context", "_verify_plan"):
             setattr(self, name, types.MethodType(getattr(W.State, name), self))
+
+    def _roots_note(self):
+        return ""
+
+    async def _review_after_step(self, plan, step, ok, final, client, may_change):
+        if self.planner is None:
+            return W.review.Decision()
+        return await W.State._review_after_step(self, plan, step, ok, final, self.planner, may_change)
 
     async def __aenter__(self):
         return self
@@ -59,6 +69,7 @@ class FakeState:
         for rel, content in touched.items():
             (self.root / rel).write_text(content, encoding="utf-8")
         self._step_touched = list(touched)
+        self._step_actions = [("run_shell", {"command": f"cmd{len(self.run_log)}"}, f"вивід {len(self.run_log)}")]
         return final, (["write_file -> ok"] if touched or final else [])
 
 
@@ -155,6 +166,63 @@ def _main() -> None:
     plan = make_plan(2)
     run(st, plan, verdicts=[{"ok": False, "step_id": 2, "note": "ще не так"}] * 5)
     assert len(st.run_log) == 2 + 2, st.run_log
+
+    # 7) планувальник після кроку 1 коригує невиконаний крок 2 і додає крок; у чаті — його «роздум»;
+    #    крок 1 має точний звіт (команда → вивід), його бачить крок 2
+    import json
+
+    class Planner:
+        def __init__(self, answers):
+            self.answers, self.calls = list(answers), []
+
+        def chat(self, messages, tools=None, profile=None, fmt=None):
+            self.calls.append(messages[-1]["content"])
+            return {"content": json.dumps(self.answers.pop(0) if self.answers else {"action": "continue", "comment": ""})}
+
+    st = FakeState(root, ok_script)
+    st.planner = Planner([{"action": "revise", "comment": "Крок 1 готовий (cmd1 → вивід 1). Уточнюю крок 2.",
+                           "revise": [{"step_id": 2, "description": "НОВИЙ крок 2"}], "add_steps": ["доданий крок"]}])
+    plan = make_plan(2)
+    run(st, plan)
+    assert [t for _, t in st.run_log][:3] == ["крок 1", "НОВИЙ крок 2", "доданий крок"], st.run_log
+    assert any(n.startswith("💭 Крок 1 готовий") for n in st.notes) and plan.steps[0].report.startswith("$ cmd1")
+    assert "$ cmd1" in st.planner.calls[0] and "вивід 1" in st.planner.calls[0]       # планувальник бачив точні факти
+    assert "$ cmd1" in st.step_contexts[1]                                           # виконавець кроку 2 — теж
+    assert [s.status for s in plan.steps] == ["done"] * 3
+
+    # 8) крок невдалий, планувальник переписав його — повтор за новим описом; безкінечні переписування обмежені
+    def flaky(text, st):
+        return (ITER_LIMIT_MSG, {}) if text == "крок 1" else ("ок", {})
+    st = FakeState(root, flaky)
+    st.planner = Planner([{"action": "revise", "comment": "Не вийшло, пробую інакше.",
+                           "revise": [{"step_id": 1, "description": "крок 1 інакше"}]}])
+    plan = make_plan(2)
+    run(st, plan)
+    assert [t for _, t in st.run_log][:2] == ["крок 1", "крок 1 інакше"] and plan.steps[0].status == "done"
+
+    def always_fail(text, st):
+        return ITER_LIMIT_MSG, {}
+    st = FakeState(root, always_fail)
+    st.planner = Planner([{"action": "revise", "comment": "ще раз", "revise": [{"step_id": 1, "description": f"спроба {i}"}]}
+                          for i in range(10)])
+    plan = make_plan(2)
+    run(st, plan)
+    assert len(st.run_log) == 1 + W.review.MAX_REPLANS and plan.steps[0].status == "failed" and st.has_pending, st.run_log
+
+    # 9) збій/сміття від планувальника не ламає виконання (просто «далі»)
+    st = FakeState(root, ok_script)
+    st.planner = Planner([])
+    st.planner.chat = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("модель лежить"))
+    plan = make_plan(2)
+    run(st, plan)
+    assert [s.status for s in plan.steps] == ["done"] * 2
+
+    # 10) планувальник каже stop після успішного кроку — зупиняємось і лишаємо план для відновлення
+    st = FakeState(root, ok_script)
+    st.planner = Planner([{"action": "stop", "comment": "Потрібне ваше рішення: який порт?"}])
+    plan = make_plan(3)
+    run(st, plan)
+    assert len(st.run_log) == 1 and st.has_pending and "💭 Потрібне ваше рішення: який порт?" in st.notes
     print("OK: orchestration_flow — результати між кроками, зупинка/відновлення, звірка і обмежені повтори")
 
 

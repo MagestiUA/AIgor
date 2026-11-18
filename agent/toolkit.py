@@ -282,7 +282,10 @@ def h_run_shell(args, ctx):
         r = T.run_shell(cmd, cwd=str(ctx.root))
         if not r.allowed:
             return f"заблоковано allowlist: {cmd}"
-    return (r.stdout or r.stderr or f"rc={r.returncode}")[:2000]
+    out = (r.stdout or r.stderr or f"rc={r.returncode}")[:2000]
+    if r.returncode not in (0, None) and out != f"rc={r.returncode}":
+        out += f"\n[код завершення: {r.returncode}]"      # без цього планувальник не бачить, що команда впала
+    return out
 
 
 def _apply_or_reject(res, path, ctx, made: str) -> str:

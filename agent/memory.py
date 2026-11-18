@@ -13,6 +13,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 STATE_DIR = ".agent"
+REPORT_IN_PLAN = 400      # скільки символів фактів кроку показуємо у зрізі плану
 
 
 @dataclass
@@ -23,6 +24,7 @@ class Step:
     target: str | None = None
     status: str = "pending"   # pending | done | failed
     result: str = ""          # СТИСЛИЙ результат (один рядок), не сирий вивід
+    report: str = ""          # точні факти кроку: команда → вивід, змінені файли (agent/stepreview.facts_report)
 
     @property
     def is_noop(self) -> bool:
@@ -90,6 +92,9 @@ def render_for_planner(state: TaskState) -> str:
         lines.append(f"  {mark.get(s.status, '[ ]')} #{s.id} [{s.kind}]{tgt}: {s.description}")
         if s.result:
             lines.append(f"        -> {s.result}")
+        if s.report:                                     # точні команди й вивід — стисло, щоб не роздувати контекст
+            rep = s.report if len(s.report) <= REPORT_IN_PLAN else s.report[:REPORT_IN_PLAN] + "…"
+            lines.append("        факти: " + rep.replace("\n", "\n          "))
     if state.facts:
         lines.append("\nФакти/артефакти:")
         for k, v in state.facts.items():

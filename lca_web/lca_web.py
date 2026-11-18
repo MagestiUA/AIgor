@@ -37,6 +37,7 @@ from agent.agent_loop import (ITER_LIMIT_MSG, is_incomplete, _estimate_iters, NU
                               extract_intended_attachments)
 from agent.answerer import build_context
 from agent.hierarchical import check_consistency
+from agent import stepreview as review
 from agent.intent import classify_intent
 from agent.llm import OllamaClient
 from agent.memory import render_for_planner, render_for_user
@@ -189,6 +190,7 @@ class State(rx.State):
     activity_last: str = ""                # ISO-час останньої події (годинник «N с тому» на клієнті)
     _act_seq: int = 0                      # лічильник id подій (backend-only)
     _step_touched: list = []               # файли, які змінив останній виконаний крок (backend-only)
+    _step_actions: list = []               # (тул, args, результат) останнього кроку — для звіту планувальнику
     git_is_repo: bool = False              # робоча тека — git-репозиторій
     git_branch: str = ""
     git_add: int = 0
@@ -1154,9 +1156,12 @@ class State(rx.State):
             nxt = next(s for s in plan.steps if s.status != "done")
             async with self:
                 self._append("assistant", f"▶ Продовжую план з кроку #{nxt.id} (виконано {done_before} з {total}).", "note")
-        for step in plan.steps:
-            if step.status == "done":
-                continue
+        replans = 0                                            # скільки разів планувальник уже коригував план
+        while True:
+            step = next((s for s in plan.steps if s.status != "done"), None)   # план може рости/мінятись
+            if step is None:
+                break
+            total = len(plan.steps)
             if stop_ev is not None and stop_ev.is_set():       # перервано між кроками
                 stopped = True
                 break
@@ -1173,10 +1178,24 @@ class State(rx.State):
             plan.set_result(step.id, "done" if ok else "failed", final or "—")
             async with self:
                 files = list(self._step_touched)
+                actions = list(self._step_actions)
+            step.report = review.facts_report(actions)         # точні факти: команда → вивід, файли
             if files:
                 touched_by_step[step.id] = files
                 plan.facts["змінені файли"] = ", ".join(dict.fromkeys(
                     f for fl in touched_by_step.values() for f in fl))[:500]
+            more = any(s.status != "done" for s in plan.steps)
+            if (len(plan.steps) > 1 and (more or not ok)
+                    and not (stop_ev is not None and stop_ev.is_set())):
+                dec = await self._review_after_step(plan, step, ok, final, client, replans < review.MAX_REPLANS)
+                if review.apply_decision(plan, dec, step.id, replans < review.MAX_REPLANS):
+                    replans += 1
+                    if step.status == "pending":               # невдалий крок переписано — пробуємо знову
+                        continue
+                if dec.action == "stop" and ok:
+                    async with self:
+                        self._save_pending(plan)
+                    return render_for_planner(plan)
             if not ok:
                 failed = step
                 break
@@ -1201,6 +1220,24 @@ class State(rx.State):
             self._append("assistant", "⛔ Зупинено — решту можна продовжити кнопкою «Виконати»" if stopped
                          else "Готово ✓", "note")
         return render_for_planner(plan) + (f"\n{verify_note}" if verify_note else "")
+
+    async def _review_after_step(self, plan, step, ok: bool, final: str, client, may_change: bool):
+        """Планувальник дивиться на ТОЧНІ факти кроку (команди й вивід) і вирішує: далі / скоригувати / зупинитись.
+        Його коротке пояснення виходить у чат («що сталося, що далі»). Збій моделі → просто «далі»."""
+        async with self:
+            self.status = f"Планувальник оцінює крок #{step.id}…"
+        try:
+            dec = await asyncio.to_thread(lambda: review.review_step(
+                render_for_planner(plan), step, ok, final, step.report, client))
+        except Exception as e:                                  # планувальник не критичний — не валимо виконання
+            _log.warning("перегляд плану після кроку #%s не вдався: %s", step.id, e)
+            return review.Decision()
+        if not may_change and dec.action == "revise":
+            dec.action = "continue"
+        if dec.comment:
+            async with self:
+                self._append("assistant", f"💭 {dec.comment}", "note")
+        return dec
 
     async def _verify_plan(self, plan, root: str, client, ctx, touched_by_step: dict, stop_ev, att_note: str) -> str:
         """Звірка після всіх кроків: (1) змінені .py компілюються; (2) LLM-перевірка узгодженості
@@ -1302,6 +1339,7 @@ class State(rx.State):
             lambda: _estimate_iters(step_text, context, client))
         guard = LoopGuard()
         actions: list[tuple[str, str]] = []   # (tool, result)
+        full_actions: list[tuple[str, dict, str]] = []   # (tool, args, result) — для точного звіту планувальнику
         touched: list[str] = []               # файли, змінені цим кроком (для звірки)
         stats: list[dict] = []                # client.last_stats кожного виклику моделі
         final = ITER_LIMIT_MSG
@@ -1347,6 +1385,7 @@ class State(rx.State):
                 args = _args(call)
                 result = await self._dispatch_tool(reg, name, args, ctx)
                 actions.append((name, result))
+                full_actions.append((name, args, result))
                 if act.result_ok(result):
                     touched.extend(orch.touched_paths(name, args))
                 messages.append({"role": "tool", "content": result})
@@ -1385,7 +1424,8 @@ class State(rx.State):
             content += f"\n\n{final}"
         async with self:
             self._step_touched = list(dict.fromkeys(touched))
-            self._add_stats(stats)                       # лічильник над полем вводу
+            self._step_actions = full_actions
+            self._add_stats(stats)                      # лічильник над полем вводу
             self._append("assistant", content, "step", thinking=log_md)
         return final, log
 
