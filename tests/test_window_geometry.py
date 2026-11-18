@@ -7,7 +7,7 @@ SCR = (-1958, -1800, 6400, 3080)      # віртуальний екран з к�
 def main_() -> None:
     s = main.sane_geometry
     g = s({"width": 128, "height": 22, "x": -25600, "y": -25600}, SCR)
-    assert g["x"] is None and g["y"] is None and g["width"] >= main.MIN_WINDOW[0] and g["height"] >= main.MIN_WINDOW[1]
+    assert g["x"] is None and g["y"] is None and (g["width"], g["height"]) == (1280, 860)
     ok = s({"width": 1280, "height": 860, "x": 100, "y": 50}, SCR)
     assert (ok["x"], ok["y"], ok["width"]) == (100, 50, 1280)
     assert s({"width": 1280, "height": 860, "x": -1900, "y": -1700}, SCR)["x"] == -1900      # другий монітор ліворуч-вгорі

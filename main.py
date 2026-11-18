@@ -68,8 +68,10 @@ def sane_geometry(geo: dict, screen: tuple[int, int, int, int] | None) -> dict:
     Розмір — не менший за min_size; координати лишаємо лише якщо верхній лівий кут вікна (з запасом 60 px
     під заголовок) всередині монітора, інакше x/y скидаємо — система розмістить вікно сама."""
     g = dict(geo)
-    g["width"] = max(MIN_WINDOW[0], int(g.get("width") or DEFAULT_GEOMETRY["width"]))
-    g["height"] = max(MIN_WINDOW[1], int(g.get("height") or DEFAULT_GEOMETRY["height"]))
+    w, h = int(g.get("width") or 0), int(g.get("height") or 0)
+    if w < MIN_WINDOW[0] or h < MIN_WINDOW[1]:               # сміттєвий (згорнутий) розмір — беремо типовий
+        w, h = DEFAULT_GEOMETRY["width"], DEFAULT_GEOMETRY["height"]
+    g["width"], g["height"] = w, h
     x, y = g.get("x"), g.get("y")
     if x is None or y is None:
         g["x"] = g["y"] = None
@@ -238,6 +240,28 @@ def _open_window(url: str, log) -> None:
             window.evaluate_js("window.dispatchEvent(new Event('resize'))")
         except Exception:                                   # noqa: BLE001
             pass
+    def _ensure_visible(*_a) -> None:
+        """Після показу: якщо вікно реально поза всіма моніторами (збережені/системні координати зламані) —
+        повертаємо в центр основного монітора. Страхує там, де перевірка геометрії до запуску не спрацювала."""
+        try:
+            x, y, w, h = window.x, window.y, window.width, window.height
+            if x is None or y is None:
+                return
+            scr = _virtual_screen()
+            if sane_geometry({"width": w, "height": h, "x": x, "y": y}, scr)["x"] is not None:
+                return
+            import ctypes
+            pw, ph = ctypes.windll.user32.GetSystemMetrics(0), ctypes.windll.user32.GetSystemMetrics(1)
+            nw, nh = min(max(w, MIN_WINDOW[0]), pw), min(max(h, MIN_WINDOW[1]), ph)
+            log.warning("вікно поза екраном (x=%s y=%s %sx%s, екран=%s) — переношу в центр основного монітора %sx%s",
+                        x, y, w, h, scr, pw, ph)
+            window.resize(nw, nh)
+            window.move(max(0, (pw - nw) // 2), max(0, (ph - nh) // 2))
+        except Exception:                                   # noqa: BLE001
+            log.exception("не вдалося перевірити/повернути вікно в межі екрана")
+    window.events.shown += _ensure_visible
+    window.events.loaded += _ensure_visible
+
     from agent import winmetrics
     log.info("система: %s", winmetrics.system_info())
     def _settled(why: str) -> None:
