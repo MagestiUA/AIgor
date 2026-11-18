@@ -70,6 +70,9 @@ class FakeState:
         for rel, content in touched.items():
             (self.root / rel).write_text(content, encoding="utf-8")
         self._step_touched = list(touched)
+        if step_text in getattr(self, "no_actions", ()):              # крок, де виконавець не викликав жодного тула
+            self._step_actions = []
+            return final, []
         self._step_actions = [("run_shell", {"command": f"cmd{len(self.run_log)}"}, f"вивід {len(self.run_log)}")]
         return final, (["write_file -> ok"] if touched or final else [])
 
@@ -273,6 +276,37 @@ def _main() -> None:
         W.check_consistency = real
     assert st.queued_text == "і ще одне пізніше" and CID not in W._LIVE_NOTES and CID not in W._PLAN_ACTIVE
 
+    # 14) крок БЕЗ жодної дії («виправ помилки, якщо є» — помилок нема): планувальник бачив факти й прийняв → не «невдача»
+    def idle_script(text, st):
+        return "Помилок немає, виправляти нічого.", {}
+
+    st = FakeState(root, idle_script)
+    st.no_actions = {"крок 2"}
+    st.planner = Planner([{"action": "continue", "comment": ""},                       # після кроку 1
+                          {"action": "continue", "comment": "Крок 2 не потребував дій — йдемо далі."}])
+    plan = make_plan(3)
+    run(st, plan)
+    assert [s.status for s in plan.steps] == ["done"] * 3 and not st.has_pending, [s.status for s in plan.steps]
+    assert not any("не завершено" in n for n in st.notes)
+
+    # 15) без пояснення планувальника (збій/сміття) крок без дій лишається невдалим — вигадане виконання не проходить
+    st = FakeState(root, idle_script)
+    st.no_actions = {"крок 2"}
+    st.planner = Planner([{"action": "continue", "comment": ""}, {"action": "continue", "comment": ""}])
+    plan = make_plan(3)
+    run(st, plan)
+    assert [s.status for s in plan.steps] == ["done", "failed", "pending"] and st.has_pending
+
+    # 16) а ліміт/зациклення планувальник «прийняти» не може навіть із поясненням
+    def limit_script(text, st):
+        return ITER_LIMIT_MSG, {}
+
+    st = FakeState(root, limit_script)
+    st.no_actions = {"крок 1"}
+    st.planner = Planner([{"action": "continue", "comment": "ну нехай."}])
+    plan = make_plan(2)
+    run(st, plan)
+    assert plan.steps[0].status == "failed" and st.has_pending
     print("OK: orchestration_flow — результати між кроками, зупинка/відновлення, звірка і обмежені повтори")
 
 

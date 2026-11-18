@@ -1279,6 +1279,13 @@ class State(rx.State):
                     replans += 1
                     if step.status == "pending":               # невдалий крок переписано — пробуємо знову
                         continue
+                if (not ok and dec.action == "continue" and dec.comment and (final or "").strip()
+                        and not is_incomplete(final) and not step.report.strip()):
+                    # Крок без жодної дії (напр. «виправ помилки, якщо є» — помилок нема): правило «без дій = невдача»
+                    # ловить вигадане виконання, але планувальник бачив факти (дій не було) і текст виконавця й прийняв
+                    # крок («continue» з поясненням). Ліміт/зациклення/контекст сюди не потрапляють (is_incomplete).
+                    plan.set_result(step.id, "done", final)
+                    ok = True
                 if dec.action == "stop" and ok:
                     async with self:
                         self._save_pending(plan)
@@ -3097,22 +3104,25 @@ def input_box() -> rx.Component:
 
 
 @rx.memo
-def message_bubble_memo(m: rx.Var[dict[str, Any]], font: rx.Var[str]) -> rx.Component:
+def message_bubble_memo(role: rx.Var[str], content: rx.Var[str], kind: rx.Var[str], thinking: rx.Var[str],
+                        atts: rx.Var[str], font: rx.Var[str]) -> rx.Component:
     """Бульбашка повідомлення, МЕМОЇЗОВАНА (React.memo): поки повідомлення не змінилось, воно не
-    перемальовується. Без цього кожне оновлення стану (стрім, статус, лічильники) заново розбирало markdown
+    перемальовується. Props — ПРОСТІ РЯДКИ (а не обʼєкт повідомлення): при додаванні нового повідомлення Reflex
+    замінює весь масив messages, тож обʼєкти всіх повідомлень стають «новими» й React.memo за обʼєктом не спрацьовує,
+    а за рядками — спрацьовує. Без цього кожне оновлення стану (стрім, статус, лічильники) заново розбирало markdown
     УСІХ повідомлень чату — у довгому чаті це блокувало вікно на ~секунду за оновлення (лаги вводу)."""
-    mine = m["role"] == "user"
+    mine = role == "user"
     return rx.box(
         rx.cond(
             mine,
             rx.vstack(
-                rx.text(m["content"], class_name="whitespace-pre-wrap text-gray-100",
+                rx.text(content, class_name="whitespace-pre-wrap text-gray-100",
                         style={"fontSize": font}),
                 rx.cond(
-                    m["attachments"].to(list[str]).length() > 0,
+                    atts != "",
                     rx.hstack(
                         rx.foreach(
-                            m["attachments"].to(list[str]),
+                            atts.split("\n"),
                             lambda n: rx.hstack(
                                 rx.icon("file", size=11, class_name="text-gray-400"),
                                 rx.text(n, class_name="text-xs text-gray-300 truncate max-w-40"),
@@ -3126,18 +3136,18 @@ def message_bubble_memo(m: rx.Var[dict[str, Any]], font: rx.Var[str]) -> rx.Comp
             ),
             rx.box(
                 rx.cond(
-                    m["thinking"] != "",
+                    thinking != "",
                     rx.el.details(
                         rx.el.summary(
-                            rx.cond(m["kind"] == "step", "хід виконання", "Роздуми моделі"),
+                            rx.cond(kind == "step", "хід виконання", "Роздуми моделі"),
                             class_name="text-xs text-gray-500 cursor-pointer select-none"),
-                        rx.markdown(m["thinking"], class_name="max-w-full overflow-x-auto break-words"),
+                        rx.markdown(thinking, class_name="max-w-full overflow-x-auto break-words"),
                         class_name="mb-2 border-l-2 border-white/10 pl-2 max-h-80 max-w-full "
                                    "overflow-y-auto overflow-x-hidden",
                     ),
                     rx.fragment(),
                 ),
-                rx.markdown(m["content"], class_name="max-w-full overflow-x-auto break-words"),
+                rx.markdown(content, class_name="max-w-full overflow-x-auto break-words"),
                 style={"fontSize": font},
                 class_name="min-w-0 max-w-full",
             ),
@@ -3152,7 +3162,8 @@ def message_bubble_memo(m: rx.Var[dict[str, Any]], font: rx.Var[str]) -> rx.Comp
 
 
 def message_bubble(m: dict) -> rx.Component:
-    return message_bubble_memo(m=m, font=State.chat_font_px)
+    return message_bubble_memo(role=m["role"], content=m["content"], kind=m["kind"], thinking=m["thinking"],
+                               atts=m["attachments"].to(list[str]).join("\n"), font=State.chat_font_px)
 
 
 def pending_bar() -> rx.Component:
