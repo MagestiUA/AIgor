@@ -33,10 +33,21 @@ class H(BaseHTTPRequestHandler):
         if self.path == "/release":
             if STATE["release"] == 404:
                 return self._send(404, b"{}", "application/json")
+            if self.headers.get("If-None-Match") == '"v1"':          # як GitHub: «не змінилось» — 304 без тіла
+                STATE["n304"] = STATE.get("n304", 0) + 1
+                self.send_response(304)
+                self.end_headers()
+                return
             d = {"tag_name": "b_0.0.19", "body": "Що нового: тест", "assets": [
                 {"name": "Igor.exe", "browser_download_url": base + "/exe"},
                 {"name": "Igor.exe.sha256", "browser_download_url": base + "/sha"}]}
-            return self._send(200, json.dumps(d).encode(), "application/json")
+            b = json.dumps(d).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("ETag", '"v1"')
+            self.send_header("Content-Length", str(len(b)))
+            self.end_headers()
+            return self.wfile.write(b)
         if self.path == "/exe":
             return self._send(200, NEW_BODY)
         if self.path == "/sha":
@@ -87,6 +98,9 @@ def _main() -> None:
     info = updater.check("b_0.0.18", api_url=api)
     assert info["ok"] and info["newer"] and info["latest"] == "b_0.0.19" and info["exe_url"] and "тест" in info["notes"]
     assert not updater.check("b_0.0.19", api_url=api)["newer"]
+    # повторні (періодичні) перевірки: 304 «не змінилось» з кешу — той самий результат без повного запиту
+    again = updater.check("b_0.0.18", api_url=api)
+    assert STATE.get("n304", 0) >= 1 and again["newer"] and again["latest"] == "b_0.0.19" and again["exe_url"] == info["exe_url"]
     STATE["release"] = 404
     r = updater.check("b_0.0.18", api_url=api)
     assert r["ok"] and not r["newer"] and r["latest"] == "" and not r["error"]    # релізів ще нема — не помилка

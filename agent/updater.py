@@ -43,17 +43,32 @@ def is_newer(latest: str, current: str) -> bool:
     return bool(a and b and a > b)
 
 
+_ETAGS: dict[str, tuple[str, dict]] = {}     # api_url -> (ETag, остання відповідь): для часткових перевірок
+
+
 def check(current: str, api_url: str = API_URL, timeout: float = 6.0) -> dict:
-    """Запитати останній реліз. -> {ok, current, latest, newer, exe_url, sha_url, notes, error}."""
+    """Запитати останній реліз. -> {ok, current, latest, newer, exe_url, sha_url, notes, error}.
+    Перевірки можуть бути частими (періодичні), тож шлемо If-None-Match: відповідь 304 «не змінилось» не
+    рахується в ліміті GitHub (60 запитів/год з однієї IP без ключа) і майже нічого не коштує."""
     out = {"ok": False, "current": current, "latest": "", "newer": False,
            "exe_url": "", "sha_url": "", "notes": "", "error": ""}
     try:
-        r = requests.get(api_url, headers=HEADERS, timeout=timeout)
-        if r.status_code == 404:                 # репозиторій без жодного релізу — не помилка, просто нема що ставити
-            out["ok"] = True
-            return out
-        r.raise_for_status()
-        d = r.json()
+        headers = dict(HEADERS)
+        cached = _ETAGS.get(api_url)
+        if cached:
+            headers["If-None-Match"] = cached[0]
+        r = requests.get(api_url, headers=headers, timeout=timeout)
+        if r.status_code == 304 and cached:
+            d = cached[1]
+        else:
+            if r.status_code == 404:                 # репозиторій без жодного релізу — не помилка, просто нема що ставити
+                _ETAGS.pop(api_url, None)
+                out["ok"] = True
+                return out
+            r.raise_for_status()
+            d = r.json()
+            if r.headers.get("ETag"):
+                _ETAGS[api_url] = (r.headers["ETag"], d)
     except (requests.RequestException, ValueError) as e:
         out["error"] = f"не вдалося зв'язатися з GitHub: {type(e).__name__}"
         return out

@@ -7,6 +7,7 @@ G3: керування сесіями через бекенд (agent/session.py)
 import asyncio
 import functools
 import json
+import os
 import re
 import threading
 import time
@@ -184,7 +185,9 @@ def restore_input_js(text: str) -> str:
             f"{json.dumps(text)},0)")
 
 
-_UPDATE_CHECKED = False                  # тиха перевірка оновлень на старті — раз на запуск
+UPDATE_POLL_S = float(os.environ.get("IGOR_UPDATE_POLL_S") or 120)   # період перевірки оновлень, с (поки активна розробка — 2 хв; потім 900–3600)
+_POLL_GEN = 0                               # поколінна відмітка циклу перевірки: новий on_load витісняє старий
+_UPDATE_CHECKED = False                 # тиха перевірка оновлень на старті — раз на запуск
 
 
 class State(rx.State):
@@ -945,6 +948,26 @@ class State(rx.State):
             if _UPDATE_CHECKED:                                 # тиха перевірка — раз на запуск, а не на кожне перезавантаження сторінки
                 return
             _UPDATE_CHECKED = True
+        await self._do_update_check(silent)
+
+    @rx.event(background=True)
+    async def poll_updates(self):
+        """Періодична тиха перевірка оновлень (раз на UPDATE_POLL_S). Запускається з on_load; кожне нове
+        завантаження сторінки витісняє попередній цикл (_POLL_GEN), тож працює рівно один."""
+        global _POLL_GEN
+        _POLL_GEN += 1
+        me = _POLL_GEN
+        while me == _POLL_GEN:
+            await asyncio.sleep(UPDATE_POLL_S)
+            if me != _POLL_GEN:
+                return
+            try:
+                await self._do_update_check(True)
+            except Exception as e:                              # noqa: BLE001 — фонова перевірка не має падати
+                _log.warning("періодична перевірка оновлень не вдалась: %s", e)
+
+    async def _do_update_check(self, silent: bool):
+        from agent import updater
         async with self:
             if self.update_busy:
                 return
@@ -957,10 +980,13 @@ class State(rx.State):
             self.update_busy = False
             self.app_ver = cur
             if info["newer"]:
+                fresh = info["latest"] != self.update_latest        # нова версія, про яку ще не казали
                 self._update_info = info
                 self.update_available, self.update_latest = True, info["latest"]
                 self.update_notes = info["notes"]
-                self.update_dismissed = False
+                if fresh:
+                    self.update_dismissed = False                   # закритий банер не вертаємо щодві хвилини
+                    _log.info("знайдено оновлення %s (у вас %s)", info["latest"], cur)
                 self.update_msg, self.update_ok = f"Доступна нова версія {info['latest']} (у вас {cur}).", True
             elif silent:
                 pass
@@ -3440,4 +3466,4 @@ app = rx.App(
     head_components=[rx.el.style("html,body{margin:0;height:100%;overflow:hidden}")],
 )
 app.add_page(index, title=f"Ігорь! · {logs.app_version()}",
-             on_load=[State.load_sessions, State.load_settings, State.check_updates(True)])
+             on_load=[State.load_sessions, State.load_settings, State.check_updates(True), State.poll_updates])
