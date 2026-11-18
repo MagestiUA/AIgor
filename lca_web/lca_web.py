@@ -64,6 +64,14 @@ _CONFIRMS: dict = {}
 
 # Stop-події для переривання стріму/виконання. Ключ — id сесії.
 _STOP_EVENTS: dict = {}
+_PLAN_ACTIVE: set = set()          # id чатів, де зараз виконується план (повідомлення йдуть планувальнику як коментар)
+_LIVE_NOTES: dict = {}             # id чату -> [{"text", "seen"}]: коментарі користувача по ходу виконання
+
+
+def _take_live_notes(cid) -> list[str]:
+    """Забрати (і прибрати) накопичені коментарі користувача для планувальника."""
+    items = _LIVE_NOTES.pop(cid, [])
+    return [i["text"] for i in items]
 
 # Вкладення зберігаються на диску (agent/attachments.py), не в пам'яті.
 
@@ -1157,6 +1165,23 @@ class State(rx.State):
         self.has_pending = True
 
     async def _execute_steps(self, plan, root: str, client):
+        """Обгортка виконання плану: поки він іде, повідомлення користувача не стають у чергу «на потім», а
+        передаються планувальнику як коментар по ходу (див. send_task, _take_live_notes). Коментарі, що не
+        встигли дійти до планувальника (прийшли після останньої перевірки), потрапляють у звичайну чергу."""
+        async with self:
+            cid = self.current_id
+        _PLAN_ACTIVE.add(cid)
+        try:
+            return await self._execute_steps_inner(plan, root, client)
+        finally:
+            _PLAN_ACTIVE.discard(cid)
+            left = _take_live_notes(cid)
+            if left:
+                async with self:
+                    txt = "\n\n".join(left)
+                    self.queued_text = (self.queued_text + "\n\n" + txt).strip() if self.queued_text else txt
+
+    async def _execute_steps_inner(self, plan, root: str, client):
         """Виконати кроки плану через per-step tool-loop: модель сама обирає тули
         (read/write/edit/run_shell), ми лише показуємо її дії та diff у чаті.
 
@@ -1214,10 +1239,15 @@ class State(rx.State):
                 plan.facts["змінені файли"] = ", ".join(dict.fromkeys(
                     f for fl in touched_by_step.values() for f in fl))[:500]
             more = any(s.status != "done" for s in plan.steps)
-            if (len(plan.steps) > 1 and (more or not ok)
+            notes = _take_live_notes(cid)                      # коментарі користувача, написані під час кроку
+            if notes:
+                plan.facts["коментарі користувача"] = " | ".join(
+                    [x for x in [plan.facts.get("коментарі користувача", "")] if x] + [n[:300] for n in notes])[-600:]
+            if (((len(plan.steps) > 1 and (more or not ok)) or notes)
                     and not (stop_ev is not None and stop_ev.is_set())):
-                dec = await self._review_after_step(plan, step, ok, final, client, replans < review.MAX_REPLANS)
-                if review.apply_decision(plan, dec, step.id, replans < review.MAX_REPLANS):
+                may = bool(notes) or replans < review.MAX_REPLANS      # коментар користувача обмеженням не глушимо
+                dec = await self._review_after_step(plan, step, ok, final, client, may, notes)
+                if review.apply_decision(plan, dec, step.id, may):
                     replans += 1
                     if step.status == "pending":               # невдалий крок переписано — пробуємо знову
                         continue
@@ -1250,14 +1280,15 @@ class State(rx.State):
                          else "Готово ✓", "note")
         return render_for_planner(plan) + (f"\n{verify_note}" if verify_note else "")
 
-    async def _review_after_step(self, plan, step, ok: bool, final: str, client, may_change: bool):
+    async def _review_after_step(self, plan, step, ok: bool, final: str, client, may_change: bool,
+                                 user_notes: list[str] | None = None):
         """Планувальник дивиться на ТОЧНІ факти кроку (команди й вивід) і вирішує: далі / скоригувати / зупинитись.
         Його коротке пояснення виходить у чат («що сталося, що далі»). Збій моделі → просто «далі»."""
         async with self:
             self.status = f"Планувальник оцінює крок #{step.id}…"
         try:
             dec = await asyncio.to_thread(lambda: review.review_step(
-                render_for_planner(plan), step, ok, final, step.report, client))
+                render_for_planner(plan), step, ok, final, step.report, client, user_notes))
         except Exception as e:                                  # планувальник не критичний — не валимо виконання
             _log.warning("перегляд плану після кроку #%s не вдався: %s", step.id, e)
             return review.Decision()
@@ -1373,9 +1404,17 @@ class State(rx.State):
         stats: list[dict] = []                # client.last_stats кожного виклику моделі
         final = ITER_LIMIT_MSG
         nudged = False
+        async with self:
+            cid_live = self.current_id
         for _ in range(max_iters):
             if stop_event is not None and stop_event.is_set():
                 final = "зупинено користувачем"; break
+            for n in _LIVE_NOTES.get(cid_live, []):             # коментар користувача по ходу: показуємо виконавцю одразу,
+                if not n["seen"]:                               # а планувальник отримає його (не прибираємо) після кроку
+                    n["seen"] = True
+                    messages.append({"role": "user", "content":
+                                     "Коментар користувача, написаний ПІД ЧАС виконання (врахуй, якщо стосується цього "
+                                     "кроку; планувальник також його побачить і скоригує план):\n" + n["text"]})
             async with self:
                 aid = self._act_start("llm", "Запит до моделі", f"повідомлень у контексті: {len(messages)}")
             t_llm = time.monotonic()
@@ -2067,6 +2106,13 @@ class State(rx.State):
             self.attachments = []
             if self.has_pending and not self.busy and orch.is_confirmation(text):
                 self._append("assistant", "Це підтвердження плану — натисніть «Виконати» під планом (або «Відхилити»).", "note")
+                return
+            if self.busy and self.current_id in _PLAN_ACTIVE and not self.has_question:
+                # План виконується: це коментар по ходу. Не чекаємо кінця — планувальник побачить його на
+                # найближчій перевірці разом зі звітом виконавця й скоригує план; виконавець — між своїми діями.
+                _LIVE_NOTES.setdefault(self.current_id, []).append({"text": text, "seen": False})
+                self._append("assistant", "📝 Коментар прийнято — планувальник врахує його після поточного кроку "
+                                          "(виконавець побачить раніше).", "note")
                 return
             if self.busy or self.has_pending or self.has_question:                              # модель зайнята або чекає на дію користувача -> у чергу
                 self.queued_text = (self.queued_text + "\n\n" + text).strip() if self.queued_text else text

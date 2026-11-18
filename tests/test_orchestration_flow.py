@@ -32,16 +32,17 @@ class FakeState:
         self.step_contexts: list[str] = []
         self.run_log: list[tuple[str, str]] = []
         self.planner = None            # заглушка моделі-планувальника; None → перегляд плану нейтральний («далі»)
-        for name in ("_step_context", "_verify_plan"):
+        self.queued_text = ""
+        for name in ("_step_context", "_verify_plan", "_execute_steps_inner"):
             setattr(self, name, types.MethodType(getattr(W.State, name), self))
 
     def _roots_note(self):
         return ""
 
-    async def _review_after_step(self, plan, step, ok, final, client, may_change):
+    async def _review_after_step(self, plan, step, ok, final, client, may_change, user_notes=None):
         if self.planner is None:
             return W.review.Decision()
-        return await W.State._review_after_step(self, plan, step, ok, final, self.planner, may_change)
+        return await W.State._review_after_step(self, plan, step, ok, final, self.planner, may_change, user_notes)
 
     async def __aenter__(self):
         return self
@@ -223,6 +224,55 @@ def _main() -> None:
     plan = make_plan(3)
     run(st, plan)
     assert len(st.run_log) == 1 and st.has_pending and "💭 Потрібне ваше рішення: який порт?" in st.notes
+    # 11) КОМЕНТАР КОРИСТУВАЧА по ходу виконання: приходить під час кроку 1 → планувальник бачить його поруч зі звітом
+    #     виконавця й коригує крок 2 (навіть коли ліміт коригувань вичерпано); коментар лишається у фактах плану
+    CID = "sid-test"
+
+    def note_script(text, st):
+        if text == "крок 1":
+            W._LIVE_NOTES.setdefault(CID, []).append({"text": "Ти пишеш не в ту теку, використай out/", "seen": False})
+        return f"готово {len(st.run_log)}", {}
+
+    st = FakeState(root, note_script)
+    st.planner = Planner([{"action": "revise", "comment": "Врахував: пишу в out/.",
+                           "revise": [{"step_id": 2, "description": "крок 2 у теку out/"}]}])
+    plan = make_plan(3)
+    run(st, plan)
+    sent = st.planner.calls[0]
+    assert "КОМЕНТАР КОРИСТУВАЧА" in sent and "не в ту теку" in sent and "$ cmd1" in sent      # і коментар, і факти виконавця
+    assert [t for _, t in st.run_log][:2] == ["крок 1", "крок 2 у теку out/"], st.run_log
+    assert any(n.startswith("💭 Врахував") for n in st.notes)
+    assert "не в ту теку" in plan.facts["коментарі користувача"]
+    assert CID not in W._LIVE_NOTES and CID not in W._PLAN_ACTIVE and not st.queued_text
+
+    # 12) коментар під час ОСТАННЬОГО кроку (раніше перегляду не було б) → планувальник додає крок-виправлення
+    def last_script(text, st):
+        if text == "крок 1":
+            W._LIVE_NOTES.setdefault(CID, []).append({"text": "додай ще README", "seen": False})
+        return "ок", {}
+
+    st = FakeState(root, last_script)
+    st.planner = Planner([{"action": "revise", "comment": "Додаю README.", "add_steps": ["створити README"]}])
+    plan = make_plan(1)
+    run(st, plan)
+    assert [t for _, t in st.run_log] == ["крок 1", "створити README"] and plan.steps[1].status == "done"
+
+    # 13) коментар, що прийшов ПІСЛЯ останньої перевірки (під час звірки), не губиться: іде у звичайну чергу
+    def verdicts():
+        W._LIVE_NOTES.setdefault(CID, []).append({"text": "і ще одне пізніше", "seen": False})
+        yield {"ok": True}
+
+    st = FakeState(root, ok_script)
+    plan = make_plan(1)
+    real = W.check_consistency
+    g = verdicts()
+    W.check_consistency = lambda p, c: next(g, {"ok": True})
+    try:
+        asyncio.run(types.MethodType(W.State._execute_steps, st)(plan, str(st.root), client=None))
+    finally:
+        W.check_consistency = real
+    assert st.queued_text == "і ще одне пізніше" and CID not in W._LIVE_NOTES and CID not in W._PLAN_ACTIVE
+
     print("OK: orchestration_flow — результати між кроками, зупинка/відновлення, звірка і обмежені повтори")
 
 

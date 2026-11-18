@@ -85,7 +85,9 @@ REVIEW_SYSTEM = (
     "new steps in add_steps. stop = you need input from the user or the task is impossible; explain why "
     "in comment. Never touch steps already marked done. Be conservative: if the facts show the step did "
     "what it was asked (e.g. exit code 0, expected output), choose continue — do not re-plan because of "
-    "wording. comment: 1-2 short sentences in the user's language, first person, saying what happened "
+    "wording. If a USER COMMENT is given, it has priority: the user watched the work live and is correcting "
+    "you — adapt the plan to it (revise pending steps / add steps), and acknowledge it in comment. "
+    "comment: 1-2 short sentences in the user's language, first person, saying what happened "
     "(cite the command and its key output when it matters) and what you do next."
 )
 
@@ -103,11 +105,17 @@ REVIEW_SCHEMA = {
 }
 
 
-def build_review_prompt(plan_text: str, step, ok: bool, final: str, report: str) -> str:
-    return (f"{plan_text}\n\nЩойно виконано крок #{step.id}: {step.description}\n"
-            f"Статус за оцінкою виконавця: {'ВИКОНАНО' if ok else 'НЕ ЗАВЕРШЕНО'}\n"
-            f"Підсумок виконавця: {(final or '—')[:600]}\n\n"
-            f"ТОЧНІ ФАКТИ (команди та їх вивід, змінені файли):\n{report or '(дій не було)'}")
+def build_review_prompt(plan_text: str, step, ok: bool, final: str, report: str,
+                        user_notes: list[str] | None = None) -> str:
+    p = (f"{plan_text}\n\nЩойно виконано крок #{step.id}: {step.description}\n"
+         f"Статус за оцінкою виконавця: {'ВИКОНАНО' if ok else 'НЕ ЗАВЕРШЕНО'}\n"
+         f"Підсумок виконавця: {(final or '—')[:600]}\n\n"
+         f"ТОЧНІ ФАКТИ (команди та їх вивід, змінені файли):\n{report or '(дій не було)'}")
+    if user_notes:
+        p += ("\n\nКОМЕНТАР КОРИСТУВАЧА (написаний ПІД ЧАС виконання; має ПРІОРИТЕТ над твоїми припущеннями — "
+              "виправ план відповідно; якщо він каже, що вже зроблене не так, додай крок-виправлення):\n"
+              + "\n".join(f"- {n[:1500]}" for n in user_notes))
+    return p
 
 
 def parse_decision(content: str) -> Decision:
@@ -130,9 +138,10 @@ def parse_decision(content: str) -> Decision:
                     revise={k: v for k, v in rev.items() if v}, add_steps=adds[:4])
 
 
-def review_step(plan_text: str, step, ok: bool, final: str, report: str, client) -> Decision:
+def review_step(plan_text: str, step, ok: bool, final: str, report: str, client,
+                user_notes: list[str] | None = None) -> Decision:
     msg = client.chat([{"role": "system", "content": REVIEW_SYSTEM},
-                       {"role": "user", "content": build_review_prompt(plan_text, step, ok, final, report)}],
+                       {"role": "user", "content": build_review_prompt(plan_text, step, ok, final, report, user_notes)}],
                       profile=config.EXECUTOR, fmt=REVIEW_SCHEMA)
     return parse_decision(msg.get("content") or "")
 
