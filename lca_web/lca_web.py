@@ -20,6 +20,7 @@ import reflex as rx
 from reflex_base.style import set_color_mode
 
 from agent import attachments as A
+from agent import images
 from agent import backend as B
 from agent import config
 from agent import convo
@@ -146,19 +147,42 @@ PASTE_SETUP_JS = """
 (() => {
   if (window._lcaPasteBound) return;
   window._lcaPasteBound = true;
-  document.addEventListener('paste', (e) => {
-    const cd = e.clipboardData;
-    if (!cd) return;
-    const files = Array.from(cd.files || []);
-    if (!files.length) return;
+  // Єдина точка: передати файли (з буфера чи з перетягування) у прихований input rx.upload → handle_upload.
+  const forward = (files) => {
     const input = document.querySelector('.rx-Upload input[type="file"]');
-    if (!input) return;
-    e.preventDefault();
+    if (!input || !files.length) return false;
     const dt = new DataTransfer();
     files.forEach(f => dt.items.add(f));
     input.files = dt.files;
     input.dispatchEvent(new Event('change', { bubbles: true }));
+    return true;
+  };
+  document.addEventListener('paste', (e) => {
+    const files = Array.from((e.clipboardData && e.clipboardData.files) || []);
+    if (!files.length) return;                    // у буфері лише текст — звичайна вставка в textarea
+    if (forward(files)) e.preventDefault();       // скриншот/файл із буфера (Ctrl+V)
   });
+  // Перетягування файлів і зображень на ВСЕ вікно: підказка-накладка, а на drop — ті самі файли в handle_upload.
+  let depth = 0, ov = null;
+  const hasFiles = (e) => e.dataTransfer && Array.from(e.dataTransfer.types || []).includes('Files');
+  const show = () => {
+    if (!ov) {
+      ov = document.createElement('div');
+      ov.id = 'igor-drop';
+      ov.textContent = 'Відпустіть, щоб прикріпити файли або зображення';
+      Object.assign(ov.style, { position: 'fixed', inset: '0', zIndex: '9999', display: 'flex', alignItems: 'center',
+        justifyContent: 'center', background: 'rgba(20,20,20,0.72)', border: '2px dashed rgba(255,255,255,0.4)',
+        color: '#fff', fontSize: '20px', pointerEvents: 'none' });
+      document.body.appendChild(ov);
+    }
+    ov.style.display = 'flex';
+  };
+  const hide = () => { depth = 0; if (ov) ov.style.display = 'none'; };
+  document.addEventListener('dragenter', (e) => { if (!hasFiles(e)) return; e.preventDefault(); depth++; show(); });
+  document.addEventListener('dragover', (e) => { if (!hasFiles(e)) return; e.preventDefault(); e.dataTransfer.dropEffect = 'copy'; });
+  document.addEventListener('dragleave', (e) => { if (!hasFiles(e)) return; depth = Math.max(0, depth - 1); if (!depth) hide(); });
+  document.addEventListener('drop', (e) => { if (!hasFiles(e)) return; e.preventDefault(); hide(); forward(Array.from(e.dataTransfer.files || [])); });
+  window.addEventListener('blur', hide);
 })();
 """
 
@@ -355,7 +379,7 @@ class State(rx.State):
         зі списком повідомлень — у довгому чаті це давало лаги вводу по пів секунди. Тут текст вперше
         потрапляє в стан — лише при відправці."""
         text = str((form_data or {}).get("task") or "")
-        if not text.strip():
+        if not text.strip() and not any(a.get("image") and not a.get("error") for a in self.attachments):
             return
         if self.mode != "chat" and not self.project_root and not self.folder_input.strip():
             self._append("assistant", "Спершу вкажіть робочу теку.", "note")
@@ -496,7 +520,7 @@ class State(rx.State):
         msgs = [dict(m) for m in self.messages]
         _ = self.attachments                                  # перерахунок при зміні чипів
         cid = self.current_id
-        names = A.list_saved(cid) if cid else []
+        names = A.list_text(cid) if cid else []
         last = next((m for m in reversed(msgs) if m.get("role") == "user"), {})
         cur = set(last.get("attachments") or [])
         cur_size = sum(a["size"] for a in names if a["name"] in cur)
@@ -581,6 +605,23 @@ class State(rx.State):
         if self.mode != "chat":
             return base
         return [s for s in base if (s.get("project_id") or "") == self.current_project_id]
+
+    def _recent_image_urls(self) -> list[str]:
+        """Картинки для моделі (data-URL): із двох останніх повідомлень користувача, що мають зображення, не більше
+        images.MAX_IMAGES_PER_REQUEST. Викликати всередині `async with self` (читає self.messages)."""
+        if not self.current_id:
+            return []
+        groups, names = 0, []
+        for m in reversed(list(self.messages)):
+            if m.get("role") != "user":
+                continue
+            ims = [n for n in (m.get("attachments") or []) if images.is_image_name(n)]
+            if ims:
+                names = ims + names
+                groups += 1
+                if groups >= 2:
+                    break
+        return images.data_urls(A.session_dir(self.current_id), names)
 
     def _attachments_note(self) -> str:
         """Контекстний блок для моделі: імена файлів сесії з ДИСКА (не зі стейджинг-чіпів,
@@ -672,7 +713,7 @@ class State(rx.State):
         self.plan_first = s.plan_first
         self.references = list(s.reference_files)
         self.extra_dirs = list(s.extra_dirs)
-        self.messages = [{"thinking": "", "attachments": [], **m} for m in s.messages]
+        self.messages = [{"thinking": "", "attachments": [], "thumbs": [], **m} for m in s.messages]
         self.has_pending = s.pending_plan is not None
         self.context_summary = s.context_summary
         self.compress_log = list(s.compressions)
@@ -697,10 +738,10 @@ class State(rx.State):
             self.q_options = []
 
     def _append(self, role: str, content: str, kind: str = "text", thinking: str = "",
-                attachments: list | None = None):
+                attachments: list | None = None, thumbs: list | None = None):
         self.messages = self.messages + [
             {"role": role, "content": content, "kind": kind, "thinking": thinking,
-             "attachments": attachments or []}]
+             "attachments": attachments or [], "thumbs": thumbs or []}]
         if self.current_id:
             s = sess.load_session(self.current_id)
             # Розгорнути Reflex-проксі, ВКЛЮЧНО з вкладеним списком attachments
@@ -708,7 +749,8 @@ class State(rx.State):
             s.messages = [
                 {"role": m["role"], "content": m["content"],
                  "kind": m.get("kind", "text"), "thinking": m.get("thinking", ""),
-                 "attachments": list(m.get("attachments", []) or [])}
+                 "attachments": list(m.get("attachments", []) or []),
+                 "thumbs": list(m.get("thumbs", []) or [])}
                 for m in self.messages]
             sess.save_session(s)
 
@@ -897,6 +939,7 @@ class State(rx.State):
         self.llm_backend = eff["backend"]
         self.llm_model = d.get("llm_model", "")
         self.llm_key_saved = bool(d.get("llm_api_key"))
+        A.migrate_legacy()                                       # вкладення зі старого місця (<репо>/.attachments)
         self.gpu_enabled = bool(d.get("gpu_monitor", True))
         self.gpu_port = str(d.get("gpu_monitor_port") or "8001")
         self.llm_host, self.llm_port = d.get("llm_host", ""), str(d.get("llm_port", ""))
@@ -1163,13 +1206,28 @@ class State(rx.State):
         for file in files:
             if len(self.attachments) >= A.MAX_FILES:
                 break
+            data = await file.read()
+            if images.sniff(data) or images.is_image_name(file.filename):
+                # Зображення (скріпка, Ctrl+V, перетягування): перевірка за сигнатурою, зменшення, мініатюра.
+                # Імена унікалізуємо за чіпами й файлами сесії (вставлений скриншот завжди «image.png» —
+                # не можна затерти картинку з попереднього повідомлення).
+                taken = {a["name"] for a in self.attachments} | {a["name"] for a in A.list_saved(cid)}
+                res = images.prepare(file.filename, data, taken)
+                raw = res.pop("_data", b"")
+                if not res["error"] and raw:
+                    A.save_bytes(cid, res["name"], raw, res["thumb"])
+                chip = {"name": res["name"], "size": res["size"], "truncated": False, "error": res["error"],
+                        "image": True, "thumb": res["thumb"]}
+                self.attachments = self.attachments + [chip]
+                continue
             if any(a["name"] == file.filename for a in self.attachments):
                 continue                           # вже є — пропустити дублікат
-            data = await file.read()
             result = A.process(file.filename, data)
             content = result.pop("_content", "")  # вміст не тримаємо в State
             if not result["error"] and content:
                 A.save(cid, file.filename, content)   # валідний → на диск
+            result.setdefault("image", False)
+            result.setdefault("thumb", "")
             self.attachments = self.attachments + [result]
 
     @rx.event
@@ -1531,8 +1589,12 @@ class State(rx.State):
         reg = default_registry()
         client = ctx.client
         user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
-        messages = [{"role": "system", "content": EXEC_SYSTEM},
-                    {"role": "user", "content": user}]
+        async with self:
+            imgs = self._recent_image_urls()             # скриншот/макет користувача — виконавцю теж
+        umsg = {"role": "user", "content": user}
+        if imgs:
+            umsg["images"] = imgs
+        messages = [{"role": "system", "content": EXEC_SYSTEM}, umsg]
         # сервер: довгу роботу не обмежуємо (стежимо за прогресом, LoopGuard); локальна модель — оцінка
         max_iters = limits.get().hard_iters or await asyncio.to_thread(
             lambda: _estimate_iters(step_text, context, client))
@@ -1984,6 +2046,7 @@ class State(rx.State):
         async with self:
             cid = self.current_id
             proj_id = self.chat_project_id
+            imgs = self._recent_image_urls()
             cur_atts = list(self.messages[-1].get("attachments", []) or []) if self.messages else []
             history = [{"role": m["role"], "content": m["content"]}
                        for m in self.messages
@@ -1991,7 +2054,8 @@ class State(rx.State):
                        and m.get("kind", "text") in ("text", "answer") and m["content"]][-limits.get().history_msgs:]
         proj = CP.load_project(proj_id) if proj_id else None
         project_block = CP.as_system_block(proj.prompt) if proj else ""
-        all_names = [n["name"] for n in A.list_saved(cid)]
+        cur_atts = [n for n in cur_atts if not images.is_image_name(n)]      # картинки йдуть окремо, як зображення
+        all_names = [n["name"] for n in A.list_text(cid)]
         other_names = [n for n in all_names if n not in cur_atts]
         needs_tool_files = bool(other_names)
         # Вшити переліки файлів у ОСТАННЮ user-репліку (поточний хід), якщо файли є.
@@ -2010,6 +2074,8 @@ class State(rx.State):
         # project_block ПЕРШИМ — інструкції проекту задають рамку розмови, тема й
         # вкладення йдуть як додатковий контекст усередині цієї рамки.
         system = project_block + CHAT_SYSTEM + ("\n\n" + topics_note if topics_note else "")
+        if imgs and history and history[-1]["role"] == "user":      # зображення — до поточної репліки користувача
+            history[-1] = {**history[-1], "images": imgs}
         msgs = [{"role": "system", "content": system}] + history
         rounds = await self._estimate_rounds(text, cur_atts or all_names, client,
                                              profile=config.CHAT_EXECUTOR, cid=cid)
@@ -2052,20 +2118,24 @@ class State(rx.State):
         ANSWER_SYSTEM = self._ANSWER_TOOLS_SYSTEM
         async with self:
             cid = self.current_id
+            imgs = self._recent_image_urls()
             cur_atts = list(self.messages[-1].get("attachments", []) or []) if self.messages else []
         tctx = ToolContext(root=Path(root) if root else Path.home(),
                            permissions={"edits": "off", "shell": "off"}, client=client,
                            attachments_dir=A.session_dir(cid), track_project=bool(root),
                            extra_roots=[Path(x) for x in self.extra_dirs])
-        all_names = [n["name"] for n in A.list_saved(cid)]
+        cur_atts = [n for n in cur_atts if not images.is_image_name(n)]
+        all_names = [n["name"] for n in A.list_text(cid)]
         other_names = [n for n in all_names if n not in cur_atts]
         # cur_atts малі сумарно -> вшиваємо вмістом напряму (менше тул-раундів);
         # answer-режим однаково forced gather_first=True нижче (читає й код проєкту).
         question, _ = self._attach_or_reference(cid, text, cur_atts, other_names)
         parts = [f"Контекст:\n{ctx}" if ctx else "", f"Питання:\n{question}"]
         user = "\n\n".join(p for p in parts if p)
-        msgs = [{"role": "system", "content": ANSWER_SYSTEM},
-                {"role": "user", "content": user}]
+        umsg = {"role": "user", "content": user}
+        if imgs:
+            umsg["images"] = imgs
+        msgs = [{"role": "system", "content": ANSWER_SYSTEM}, umsg]
         rounds = await self._estimate_rounds(text, cur_atts or all_names, client, cid=cid)
         # answer-режим = аналіз коду: ЗАВЖДИ think=off-збір, щоб модель надійно читала
         # файли проєкту (read_file/list_dir). Без цього вона лише «планує» прозою й
@@ -2221,10 +2291,13 @@ class State(rx.State):
                 self._append("assistant", "Спершу вкажіть робочу теку.", "note")
                 return
             text = self.task.strip()
+            if not text and any(a.get("image") and not a.get("error") for a in self.attachments):
+                text = "Прикріплено зображення."            # картинка без підпису — теж повідомлення
             if not text:
                 return
             self.task = ""
             att_names = [a["name"] for a in self.attachments if not a.get("error")]
+            thumbs = [a["thumb"] for a in self.attachments if not a.get("error") and a.get("thumb")]
             # Великий вставлений/набраний текст у полі вводу не має жодного ліміту
             # (на відміну від файлових вкладень — MAX_FILE_SIZE) і летить прямо в
             # промпт, переповнюючи контекст (живий кейс: 687k символів — модель
@@ -2241,7 +2314,7 @@ class State(rx.State):
                         f"його частинами через read_attachment('{paste_name}').]")
             # Імена прикріплених файлів → у саме повідомлення (видно в чаті), потім
             # стейджинг-чіпи прибираємо з-під інпута. Файли лишаються на диску.
-            self._append("user", text, attachments=att_names)
+            self._append("user", text, attachments=att_names, thumbs=thumbs)
             self.attachments = []
             if self.has_pending and not self.busy and orch.is_confirmation(text):
                 self._append("assistant", "Це підтвердження плану — натисніть «Виконати» під планом (або «Відхилити»).", "note")
@@ -2420,9 +2493,11 @@ class State(rx.State):
         Повертає (task, outcome) — outcome='' якщо пауза/не виконано (підсумок не потрібен)."""
         async with self:
             att_note = self._attachments_note()
+            imgs = self._recent_image_urls()
         full_context = (context + "\n\n" + att_note).strip() if att_note else context
+        kw = {"images": imgs} if imgs else {}
         result = await asyncio.to_thread(
-            lambda: deliberate(task, full_context, client, doc, history))
+            lambda: deliberate(task, full_context, client, doc, history, **kw))
         action = result["action"]
 
         if action in ("clarify", "choose"):
@@ -3030,8 +3105,9 @@ def attachment_chips() -> rx.Component:
     def chip(a: dict) -> rx.Component:
         has_error = a["error"] != ""
         return rx.hstack(
-            rx.icon("file", size=12,
-                    class_name=rx.cond(has_error, "text-red-400", "text-gray-400")),
+            rx.cond(a["thumb"] != "",
+                    rx.image(src=a["thumb"], class_name="w-7 h-7 rounded object-cover shrink-0"),
+                    rx.icon("file", size=12, class_name=rx.cond(has_error, "text-red-400", "text-gray-400"))),
             rx.text(a["name"], class_name=rx.cond(has_error, "text-red-300", "text-gray-300")
                     + " text-xs truncate max-w-28"),
             rx.cond(has_error,
@@ -3074,6 +3150,12 @@ def controls_bar() -> rx.Component:
                 "text/x-sh": [".sh", ".bash", ".zsh", ".bat", ".ps1"],
                 "application/xml": [".xml", ".svg"],
                 "application/sql": [".sql"],
+                # зображення для моделей із зором (скріпка, Ctrl+V і перетягування йдуть тим самим шляхом)
+                "image/png": [".png"],
+                "image/jpeg": [".jpg", ".jpeg"],
+                "image/gif": [".gif"],
+                "image/webp": [".webp"],
+                "image/bmp": [".bmp"],
             },
             no_drag=True,
             # Прибрати дефолтну рамку/padding rx.upload (вони задаються як ПРЯМІ
@@ -3233,7 +3315,7 @@ def input_box() -> rx.Component:
 
 @rx.memo
 def message_bubble_memo(role: rx.Var[str], content: rx.Var[str], kind: rx.Var[str], thinking: rx.Var[str],
-                        atts: rx.Var[str], font: rx.Var[str]) -> rx.Component:
+                        atts: rx.Var[str], thumbs: rx.Var[str], font: rx.Var[str]) -> rx.Component:
     """Бульбашка повідомлення, МЕМОЇЗОВАНА (React.memo): поки повідомлення не змінилось, воно не
     перемальовується. Props — ПРОСТІ РЯДКИ (а не обʼєкт повідомлення): при додаванні нового повідомлення Reflex
     замінює весь масив messages, тож обʼєкти всіх повідомлень стають «новими» й React.memo за обʼєктом не спрацьовує,
@@ -3244,6 +3326,17 @@ def message_bubble_memo(role: rx.Var[str], content: rx.Var[str], kind: rx.Var[st
         rx.cond(
             mine,
             rx.vstack(
+                rx.cond(
+                    thumbs != "",                          # зображення, прикріплені до повідомлення (мініатюри)
+                    rx.hstack(
+                        rx.foreach(
+                            thumbs.split("\n"),
+                            lambda u: rx.image(src=u, class_name="h-24 w-auto max-w-[200px] rounded-lg object-cover"),
+                        ),
+                        class_name="flex-wrap gap-2 mb-1 justify-end",
+                    ),
+                    rx.fragment(),
+                ),
                 rx.text(content, class_name="whitespace-pre-wrap text-gray-100",
                         style={"fontSize": font}),
                 rx.cond(
@@ -3291,7 +3384,8 @@ def message_bubble_memo(role: rx.Var[str], content: rx.Var[str], kind: rx.Var[st
 
 def message_bubble(m: dict) -> rx.Component:
     return message_bubble_memo(role=m["role"], content=m["content"], kind=m["kind"], thinking=m["thinking"],
-                               atts=m["attachments"].to(list[str]).join("\n"), font=State.chat_font_px)
+                               atts=m["attachments"].to(list[str]).join("\n"),
+                               thumbs=m["thumbs"].to(list[str]).join("\n"), font=State.chat_font_px)
 
 
 def pending_bar() -> rx.Component:

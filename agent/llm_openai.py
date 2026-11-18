@@ -55,7 +55,14 @@ def _to_openai_messages(messages: list[dict]) -> list[dict]:
             cid = m.get("tool_call_id") or (pending_ids.pop(0) if pending_ids else f"call_{uuid.uuid4().hex[:12]}")
             out.append({"role": "tool", "tool_call_id": cid, "content": m.get("content") or ""})
         else:
-            out.append({"role": role, "content": m.get("content") or ""})
+            content = m.get("content") or ""
+            imgs = m.get("images") if role == "user" else None
+            if imgs:        # зображення (data-URL) → мультимодальний content: текст + частини image_url
+                parts = [{"type": "text", "text": content or "(зображення)"}]
+                parts += [{"type": "image_url", "image_url": {"url": u}} for u in imgs]
+                out.append({"role": role, "content": parts})
+            else:
+                out.append({"role": role, "content": content})
     return out
 
 

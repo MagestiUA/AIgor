@@ -23,6 +23,9 @@ class FakeState:
     async def __aexit__(self, *a):
         return False
 
+    def _recent_image_urls(self):
+        return []
+
     def _act_start(self, *a, **k):
         return 1
 

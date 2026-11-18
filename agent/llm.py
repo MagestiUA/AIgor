@@ -29,6 +29,18 @@ def _stream_event(obj: dict) -> dict:
             "thinking": msg.get("thinking", "") or "", "done": False}
 
 
+def _ollama_messages(messages: list[dict]) -> list[dict]:
+    """Ollama приймає зображення в полі `images` як ЧИСТИЙ base64 (без префікса data:...) — наші data-URL розбираємо."""
+    out = []
+    for m in messages:
+        imgs = m.get("images")
+        if imgs:
+            from .images import split_data_url
+            m = {**m, "images": [split_data_url(u)[1] or u for u in imgs]}
+        out.append(m)
+    return out
+
+
 class OllamaClient:
     def __init__(self, model: str = config.MODEL, host: str = config.HOST):
         self.model = model
@@ -115,7 +127,7 @@ class OllamaClient:
         model = profile.get("model") or self.model
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": _ollama_messages(messages),
             "stream": False,
             "think": profile["think"],
             "options": {
@@ -147,7 +159,7 @@ class OllamaClient:
         model = profile.get("model") or self.model
         payload = {
             "model": model,
-            "messages": messages,
+            "messages": _ollama_messages(messages),
             "stream": True,
             "think": profile["think"],
             "options": {

@@ -153,7 +153,8 @@ def _steps_to_state(task: str, steps: list[dict]) -> TaskState:
 
 
 def deliberate(task: str, context: str = "", client: OllamaClient | None = None,
-               project_doc: str | None = None, history: list | None = None) -> dict:
+               project_doc: str | None = None, history: list | None = None,
+               images: list[str] | None = None) -> dict:
     """Один хід планувальника-діалогу. Повертає dict:
       action: 'clarify' | 'choose' | 'plan'
       reasoning: коротке пояснення (мова користувача)
@@ -174,8 +175,11 @@ def deliberate(task: str, context: str = "", client: OllamaClient | None = None,
                        for h in history)
         user += f"\n\nВже уточнено з користувачем:\n{qa}"
 
+    umsg = {"role": "user", "content": user}
+    if images:                                           # зображення користувача (скриншот, макет) — планувальнику теж
+        umsg["images"] = list(images)
     msg = client.chat(
-        [{"role": "system", "content": DELIB_SYSTEM}, {"role": "user", "content": user}],
+        [{"role": "system", "content": DELIB_SYSTEM}, umsg],
         profile=config.EXECUTOR, fmt=DELIB_SCHEMA,
     )
     d = _parse_decision(msg.get("content") or "")
@@ -190,14 +194,14 @@ def deliberate(task: str, context: str = "", client: OllamaClient | None = None,
     if action == "plan":
         state = _steps_to_state(task, d.get("steps") or [])
         if not state.steps:                              # порожній план -> звичайний make_plan
-            state = make_plan(task, context, client, project_doc)
+            state = make_plan(task, context, client, project_doc, images=images)
 
     return {"action": action, "reasoning": str(d.get("reasoning", "")).strip(),
             "question": str(d.get("question", "")).strip(), "options": options, "state": state}
 
 
 def make_plan(task: str, context: str = "", client: OllamaClient | None = None,
-              project_doc: str | None = None) -> TaskState:
+              project_doc: str | None = None, images: list[str] | None = None) -> TaskState:
     client = client or OllamaClient()
     user = ""
     if project_doc:
@@ -206,8 +210,11 @@ def make_plan(task: str, context: str = "", client: OllamaClient | None = None,
     if context:
         user += f"\n\nКонтекст:\n{context}"
     # think=OFF для структурованого виводу: думання плутає/обриває JSON у gemma.
+    umsg = {"role": "user", "content": user}
+    if images:
+        umsg["images"] = list(images)
     msg = client.chat(
-        [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
+        [{"role": "system", "content": SYSTEM}, umsg],
         profile=config.EXECUTOR, fmt=SCHEMA,
     )
 

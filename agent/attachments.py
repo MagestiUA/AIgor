@@ -20,17 +20,18 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-from . import limits
+from . import images, limits
 
 MAX_FILE_SIZE = 200 * 1024      # 200 KB — ліміт розміру одного файлу
 MAX_FILES = 20                  # максимальна кількість вкладень
+THUMBS = ".thumbs"              # підтека з мініатюрами зображень (не вкладення)
 CHAR_BUDGET = 12_000            # символів на один файл (обрізання при збереженні)
 
-# Тека вкладень — у корені репозиторію (.attachments/<sid>/), щоб файли було легко
-# знайти. attachments.py лежить у <repo>/agent/, тож корінь = parent.parent.
-# Ім'я з крапкою — щоб Reflex dev-watcher НЕ робив hot-reload при записі файлів сюди
-# (is_excluded_by_default виключає теки на "."); на Windows тека все одно видима.
-ATTACHMENTS_ROOT = Path(__file__).resolve().parent.parent / ".attachments"
+# Тека вкладень — у профілі користувача (~/.local-code-agent/attachments/<sid>/): у зібраній exe код лежить у
+# тимчасовій теці розпакування, яку видаляють на виході, — вкладення (тим паче зображення з історії чату)
+# мусять переживати перезапуск. Не в теці проєкту, тож Reflex dev-watcher не перезапускається при записі.
+ATTACHMENTS_ROOT = Path.home() / ".local-code-agent" / "attachments"
+LEGACY_ROOT = Path(__file__).resolve().parent.parent / ".attachments"     # старе місце (у репозиторії)
 
 TEXT_EXTENSIONS = {
     ".py", ".pyw", ".pyi",
@@ -97,17 +98,59 @@ def save(session_id: str, name: str, content: str) -> Path:
     return p
 
 
+def save_bytes(session_id: str, name: str, data: bytes, thumb_url: str = "") -> Path:
+    """Зберегти бінарний вміст (зображення) у теку сесії; мініатюру (data-URL) — у .thumbs/ для чіпів."""
+    d = session_dir(session_id)
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / _safe_name(name)
+    p.write_bytes(data)
+    if thumb_url:
+        mime, b64 = images.split_data_url(thumb_url)
+        if b64:
+            (d / THUMBS).mkdir(exist_ok=True)
+            (d / THUMBS / (_safe_name(name) + ".thumb")).write_text(thumb_url, encoding="ascii")
+    return p
+
+
+def read_thumb(session_id: str, name: str) -> str:
+    try:
+        return (session_dir(session_id) / THUMBS / (_safe_name(name) + ".thumb")).read_text(encoding="ascii")
+    except OSError:
+        return ""
+
+
 def remove(session_id: str, name: str) -> None:
     """Видалити один файл вкладення з диска (ручна чистка користувачем)."""
-    try:
-        (session_dir(session_id) / _safe_name(name)).unlink()
-    except OSError:
-        pass
+    for p in (session_dir(session_id) / _safe_name(name),
+              session_dir(session_id) / THUMBS / (_safe_name(name) + ".thumb")):
+        try:
+            p.unlink()
+        except OSError:
+            pass
 
 
 def clear(session_id: str) -> None:
     """Видалити всю теку вкладень сесії (напр. при видаленні чату)."""
     shutil.rmtree(session_dir(session_id), ignore_errors=True)
+
+
+def migrate_legacy() -> int:
+    """Скопіювати вкладення зі старого місця (<репозиторій>/.attachments) у профіль користувача (лише відсутні там).
+    КОПІЮЄМО, а не переносимо: оригінали лишаються недоторканими (запуск з іншим профілем/тестовим середовищем
+    не може «забрати» чужі дані). Викликається при старті застосунку (не при імпорті — тести не чіпають реальні
+    теки). -> скільки сесій скопійовано."""
+    n = 0
+    if not LEGACY_ROOT.is_dir() or LEGACY_ROOT.resolve() == ATTACHMENTS_ROOT.resolve():
+        return 0
+    ATTACHMENTS_ROOT.mkdir(parents=True, exist_ok=True)
+    for d in LEGACY_ROOT.iterdir():
+        if d.is_dir() and not (ATTACHMENTS_ROOT / d.name).exists():
+            try:
+                shutil.copytree(d, ATTACHMENTS_ROOT / d.name)
+                n += 1
+            except OSError:
+                shutil.rmtree(ATTACHMENTS_ROOT / d.name, ignore_errors=True)     # не лишаємо напівскопійовану теку
+    return n
 
 
 def rename_session(old_id: str, new_id: str) -> None:
@@ -117,8 +160,14 @@ def rename_session(old_id: str, new_id: str) -> None:
         return
     dst = session_dir(new_id)
     if dst.exists():
-        for f in src.iterdir():                 # злити: перенести файли
-            f.replace(dst / f.name)
+        for f in src.iterdir():                 # злити: перенести файли (і теку .thumbs)
+            target = dst / f.name
+            if f.is_dir():
+                target.mkdir(exist_ok=True)
+                for g in f.iterdir():
+                    g.replace(target / g.name)
+            else:
+                f.replace(target)
         shutil.rmtree(src, ignore_errors=True)
     else:
         dst.parent.mkdir(parents=True, exist_ok=True)
@@ -127,12 +176,22 @@ def rename_session(old_id: str, new_id: str) -> None:
 
 def list_saved(session_id: str) -> list[dict]:
     """Метадані файлів, що лежать у теці сесії (для відновлення chips при виборі сесії).
-    На диску лежать лише валідні текстові файли, тож error завжди ''."""
+    На диску лежать лише валідні файли, тож error завжди ''. Для зображень image=True і thumb (data-URL)."""
     d = session_dir(session_id)
     if not d.is_dir():
         return []
-    return [{"name": p.name, "size": p.stat().st_size, "truncated": False, "error": ""}
-            for p in sorted(d.iterdir()) if p.is_file()]
+    out = []
+    for p in sorted(d.iterdir()):
+        if p.is_file():
+            img = images.is_image_name(p.name)
+            out.append({"name": p.name, "size": p.stat().st_size, "truncated": False, "error": "",
+                        "image": img, "thumb": read_thumb(session_id, p.name) if img else ""})
+    return out
+
+
+def list_text(session_id: str) -> list[dict]:
+    """Лише текстові вкладення (їх читає модель тулами/вшиванням); зображення йдуть окремо — як картинки."""
+    return [a for a in list_saved(session_id) if not a.get("image")]
 
 
 def total_size(session_id: str, names: list[str]) -> int:
@@ -159,7 +218,7 @@ def read_combined(session_id: str, names: list[str]) -> str:
     parts = []
     for n in names:
         p = d / _safe_name(n)
-        if p.is_file():
+        if p.is_file() and not images.is_image_name(n):          # картинки — не текст
             parts.append(f"=== {n} ===\n{p.read_text(encoding='utf-8', errors='replace')}")
     return "\n\n".join(parts)
 
@@ -168,7 +227,7 @@ def attachments_note(session_id: str, meta_list: list[dict]) -> str:
     """Контекстний блок для моделі: імена прикріплених файлів (БЕЗ вмісту). Модель
     читає потрібні через тул read_attachment(name) — він знаходить файл за іменем у
     теці сесії (нечіткий пошук), тож копіювати довгі шляхи не треба."""
-    files = [a for a in meta_list if not a.get("error")]
+    files = [a for a in meta_list if not a.get("error") and not a.get("image")]
     if not files:
         return ""
     lines = [f"  - {a['name']}" for a in files]
