@@ -44,7 +44,31 @@ class H(BaseHTTPRequestHandler):
         self._send(404, b"")
 
 
+TMP: list = []          # тимчасові теки цього прогону
+
+
+def kill_fakes() -> None:
+    """Фальшива «нова версія» — .cmd, який `start` відкриває в НОВІЙ консолі (/K). Тест перезаписує його, поки він ще
+    виконується, тож `exit` у кінці може не спрацювати й консоль лишається осиротілою. Тому наприкінці примусово
+    завершуємо все, що запущено з наших тимчасових тек (і лише їх)."""
+    import subprocess
+    for t in TMP:
+        subprocess.run(["powershell", "-NoProfile", "-Command",
+                        "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*' + $env:KILL_DIR + '*' "
+                        "-and $_.Name -in 'cmd.exe','conhost.exe' -and $_.ProcessId -ne $PID } | "
+                        "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"],
+                       env={**os.environ, "KILL_DIR": str(t)}, capture_output=True,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+
+
 def main() -> None:
+    try:
+        _main()
+    finally:
+        kill_fakes()
+
+
+def _main() -> None:
     # ── версії ────────────────────────────────────────────────────────────────────
     assert updater.parse_version("b_0.0.19") == (0, 0, 19) and updater.parse_version("dev") is None
     assert updater.is_newer("b_0.0.19", "b_0.0.18") and not updater.is_newer("b_0.0.18", "b_0.0.18")
@@ -56,6 +80,7 @@ def main() -> None:
     api = f"http://127.0.0.1:{srv.server_port}/release"
 
     tmp = Path(tempfile.mkdtemp())
+    TMP.append(tmp)
     updater.STATE_DIR, updater.PENDING, updater.FLAG = tmp / "st", tmp / "st" / "pending.json", tmp / "st" / "go.json"
 
     # ── перевірка релізу ──────────────────────────────────────────────────────────
@@ -117,6 +142,7 @@ def main() -> None:
     assert "_MEI123" not in seen_env and "reset=[1]" in seen_env, seen_env
     os.environ.pop("_PYI_APPLICATION_HOME_DIR", None)
     os.environ.pop("_MEIPASS2", None)
+    kill_fakes()                                              # не лишаємо консоль фальшивої версії відкритою
     assert exe.read_bytes() == NEW_BODY, "exe не підмінено"
     assert (d / "fake.cmd.old").read_bytes() == b"@echo off\r\nREM old\r\n", "стара версія для відкату не збережена"
     assert not (d / "fake.cmd.new").exists() and not updater.FLAG.exists()
