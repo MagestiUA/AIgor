@@ -70,6 +70,25 @@ def main() -> None:
     assert thinking == "".join(f"д{i} " for i in range(0, 120, 2)), "роздуми обрізано"
     assert body == "".join(f"т{i} " for i in range(120) if i % 2).strip()
 
+    # 2б) у UI під час стріму — лише хвіст роздумів (дешевий рендер), а повертається й зберігається ПОВНИЙ текст
+    st = FakeState()
+    st.think_snaps = []
+    orig_exit = FakeState.__aexit__
+
+    async def exit_rec(self, *a):
+        self.think_snaps.append(len(self.stream_thinking))
+        return await orig_exit(self, *a)
+
+    FakeState.__aexit__ = exit_rec
+    try:
+        big = ({"done": False, "content": "", "thinking": "р" * 100} for _ in range(150))
+        full = "р" * 100 * 150
+        body, thinking, _ = run(st, (e for e in list(big) + [{"done": True, "stats": None, "tool_calls": None}]))
+    finally:
+        FakeState.__aexit__ = orig_exit
+    assert thinking == full and st.stream_thinking == full                      # у кінці — повні роздуми
+    assert max(st.think_snaps[:-1]) <= W.STREAM_THINK_TAIL, st.think_snaps       # під час стріму — лише хвіст
+
     # 3) стоп посеред стріму: те, що встигло накопичитись, повертається (partial), навіть якщо не дійшло до UI
     st = FakeState()
     ev = threading.Event()

@@ -13,6 +13,7 @@ import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import reflex as rx
 from reflex_base.style import set_color_mode
@@ -168,7 +169,8 @@ BORDER = "border-white/10"
 SERIF = {"fontFamily": "Newsreader, Georgia, serif"}
 
 
-STREAM_FLUSH_S = 0.2                        # як часто (с) оновлювати стрім відповіді/роздумів у UI
+STREAM_THINK_TAIL = 3000                    # скільки символів живих роздумів показуємо під час стріму
+STREAM_FLUSH_S = 0.2                       # як часто (с) оновлювати стрім відповіді/роздумів у UI
 INPUT_ID = "task-input"                    # поле вводу повідомлення (некероване)
 CLEAR_INPUT_JS = (f"(function(){{var e=document.getElementById('{INPUT_ID}');"
                   "if(e){e.value='';e.style.height='';}})()")
@@ -1538,14 +1540,14 @@ class State(rx.State):
                 pushed_c, pushed_t = len(acc_c), len(acc_t)
                 async with self:
                     self.stream_content = acc_c
-                    self.stream_thinking = acc_t
+                    self.stream_thinking = acc_t[-STREAM_THINK_TAIL:]      # у UI лише хвіст; повні роздуми — acc_t
                     self.tok_out = base_out + counted
                     el = time.time() - t0
                     if el > 0:
                         self.tok_tps = round(self.tok_out / el, 1)
         async with self:
             self.stream_content = acc_c                  # хвіст, що не встиг пройти throttle
-            self.stream_thinking = acc_t
+            self.stream_thinking = acc_t                 # повні роздуми (для збереження в повідомлення)
             if stats:
                 self.tok_prompt += stats.get("prompt", 0)
                 self.tok_out = base_out + stats.get("out", counted)
@@ -3068,14 +3070,18 @@ def input_box() -> rx.Component:
     )
 
 
-def message_bubble(m: dict) -> rx.Component:
+@rx.memo
+def message_bubble_memo(m: rx.Var[dict[str, Any]], font: rx.Var[str]) -> rx.Component:
+    """Бульбашка повідомлення, МЕМОЇЗОВАНА (React.memo): поки повідомлення не змінилось, воно не
+    перемальовується. Без цього кожне оновлення стану (стрім, статус, лічильники) заново розбирало markdown
+    УСІХ повідомлень чату — у довгому чаті це блокувало вікно на ~секунду за оновлення (лаги вводу)."""
     mine = m["role"] == "user"
     return rx.box(
         rx.cond(
             mine,
             rx.vstack(
                 rx.text(m["content"], class_name="whitespace-pre-wrap text-gray-100",
-                        style={"fontSize": State.chat_font_px}),
+                        style={"fontSize": font}),
                 rx.cond(
                     m["attachments"].to(list[str]).length() > 0,
                     rx.hstack(
@@ -3106,7 +3112,7 @@ def message_bubble(m: dict) -> rx.Component:
                     rx.fragment(),
                 ),
                 rx.markdown(m["content"], class_name="max-w-full overflow-x-auto break-words"),
-                style={"fontSize": State.chat_font_px},
+                style={"fontSize": font},
                 class_name="min-w-0 max-w-full",
             ),
         ),
@@ -3117,6 +3123,10 @@ def message_bubble(m: dict) -> rx.Component:
             "self-start bg-white/[0.03] w-full min-w-0",
         ) + " rounded-2xl px-4 py-2.5",
     )
+
+
+def message_bubble(m: dict) -> rx.Component:
+    return message_bubble_memo(m=m, font=State.chat_font_px)
 
 
 def pending_bar() -> rx.Component:
@@ -3180,7 +3190,9 @@ def streaming_bubble() -> rx.Component:
             rx.el.details(
                 rx.el.summary("Роздуми моделі",
                               class_name="text-xs text-gray-500 cursor-pointer select-none"),
-                rx.markdown(State.stream_thinking, class_name="max-w-full overflow-x-auto break-words"),
+                # живі роздуми — ПРОСТИЙ текст (і лише хвіст): markdown розбирається заново на кожне оновлення,
+                # а роздуми бувають величезні; готові роздуми потім показуються markdown-ом у повідомленні
+                rx.text(State.stream_thinking, class_name="whitespace-pre-wrap break-words text-gray-400"),
                 class_name="mb-2 border-l-2 border-white/10 pl-2 max-h-80 max-w-full "
                            "overflow-y-auto overflow-x-hidden",
             ),
