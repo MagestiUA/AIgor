@@ -363,6 +363,7 @@ class State(rx.State):
     stream_thinking: str = ""
     # лічильник токенів поточного запиту (над полем вводу; скидається на новий запит)
     tok_prompt: int = 0
+    ctx_live: int = 0              # реальний prompt останнього запиту виконавця (токени) — для панелі контексту
     tok_out: int = 0
     tok_eval_ns: int = 0
     tok_tps: float = 0.0
@@ -419,6 +420,7 @@ class State(rx.State):
 
     def _reset_tokens(self):
         self.tok_prompt = self.tok_out = self.tok_eval_ns = 0
+        self.ctx_live = 0
         self.tok_tps = 0.0
         self.tok_model = ""
 
@@ -561,11 +563,16 @@ class State(rx.State):
 
     @rx.var
     def ctx_pct(self) -> int:
-        return int(json.loads(self.ctx_report)["used_pct"])
+        rep = json.loads(self.ctx_report)
+        live = round(100 * self.ctx_live / limits.get().context_tokens) if self.ctx_live else 0
+        return max(int(rep["used_pct"]), live)
 
     @rx.var
     def ctx_total(self) -> str:
         rep = json.loads(self.ctx_report)
+        if self.ctx_live and self.ctx_live > 0:
+            k = f"{self.ctx_live / 1000:.1f}k"
+            return f"≈{rep['used_label']} / {rep['window_label']} · останній запит {k}"
         return f"≈{rep['used_label']} / {rep['window_label']}"
 
     @rx.var
@@ -1585,7 +1592,7 @@ class State(rx.State):
         на async-паузу — діалог показується з контексту ЦІЄЇ події (дельта доходить), а
         не з відірваної корутини. Додає ОДНЕ повідомлення-крок із катом «хід виконання».
         Логіку дублюємо з agent_loop.run_step (той лишається для headless/тестів)."""
-        from agent.agent_loop import SYSTEM as EXEC_SYSTEM, _args
+        from agent.agent_loop import SYSTEM as EXEC_SYSTEM, _args, COMPACT_RATIO, compact_tool_results
         reg = default_registry()
         client = ctx.client
         user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
@@ -1626,6 +1633,7 @@ class State(rx.State):
             n_calls = len(msg.get("tool_calls") or [])
             async with self:
                 ls = client.last_stats or {}
+                self.ctx_live = int(ls.get("prompt", 0) or 0)
                 self._act_done(aid, f"{time.monotonic() - t_llm:.1f}с · ↑{ls.get('prompt', 0)} ↓{ls.get('out', 0)} токенів"
                                     + (f" · викликів тулів: {n_calls}" if n_calls else " · текстова відповідь"))
             calls, recovered = recover_tool_calls(msg)
@@ -1671,6 +1679,11 @@ class State(rx.State):
                 async with self:
                     self._append("assistant", f"⚠ Помітив повтор без прогресу ({reason}) — прошу змінити підхід.", "note")
             ls = getattr(client, "last_stats", None) or {}
+            win = limits.get().context_tokens
+            if ls and win and ls.get("prompt", 0) >= COMPACT_RATIO * win:
+                freed = compact_tool_results(messages)
+                if freed and context_full(ls.get("prompt", 0), win):
+                    continue                              # стиснули старі результати — крок може завершитись
             if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):
                 final = (f"{CONTEXT_FULL_PREFIX} ({ls.get('prompt')} токенів). "
                          "Розбийте задачу на менші кроки.")

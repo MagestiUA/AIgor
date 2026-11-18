@@ -19,6 +19,24 @@ from .toolkit import ToolContext, ToolRegistry, default_registry
 ITER_LIMIT_MSG = "досягнуто ліміту ітерацій"   # крок НЕ завершено — не вважати «done»
 
 
+COMPACT_RATIO = 0.6        # з якої частки вікна починаємо стискати старі результати тулів
+COMPACT_KEEP = 6           # скільки останніх повідомлень (хвіст) не чіпаємо
+COMPACT_HEAD = 500         # скільки символів лишаємо від старого результату тулу
+
+
+def compact_tool_results(messages: list[dict], keep_last: int = COMPACT_KEEP, head: int = COMPACT_HEAD) -> int:
+    """Стиснути СТАРІ результати тулів у циклі кроку (на місці): лишити початок + позначку.
+    Дії вже виконано, а їх підсумок бачив виконавець; без цього контекст кроку росте до 90% вікна й крок
+    переривається. -> скільки повідомлень стиснуто."""
+    n = 0
+    for m in messages[:max(0, len(messages) - keep_last)]:
+        c = m.get("content")
+        if m.get("role") == "tool" and isinstance(c, str) and len(c) > head + 80 and "[стиснуто" not in c[-60:]:
+            m["content"] = c[:head] + f"\n…[стиснуто: було {len(c)} символів; повторіть виклик, якщо потрібно]"
+            n += 1
+    return n
+
+
 def is_incomplete(final: str | None) -> bool:
     """Крок НЕ завершено (ліміт / зациклення / переповнений контекст) — не вважати «done»."""
     f = final or ""
@@ -363,6 +381,11 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
                 return guard.stuck_message(reason), log
             messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason, last=guard.last_result[:300])})
         ls = getattr(client, "last_stats", None) or {}
+        win = limits.get().context_tokens
+        if ls and win and ls.get("prompt", 0) >= COMPACT_RATIO * win:
+            freed = compact_tool_results(messages)
+            if freed and context_full(ls.get("prompt", 0), win):
+                continue                                  # стиснули — даємо кроку шанс завершитись
         if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):
             logs.get("agent").warning("контекст майже заповнений: %s токенів", ls.get("prompt"))
             return (f"{CONTEXT_FULL_PREFIX} ({ls.get('prompt')} токенів). "
