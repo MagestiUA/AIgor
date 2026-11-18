@@ -2,6 +2,7 @@
 
     python scripts/publish_release.py            # перевірки + показ, що буде опубліковано (нічого не створює)
     python scripts/publish_release.py --go       # створити реліз <версія> з dist/Igor.exe і Igor.exe.sha256
+    ... --notes "текст"                          # свій текст нотаток замість списку комітів
 
 Перед публікацією (репозиторій ПУБЛІЧНИЙ — реліз бачать усі):
  1. dist/Igor.exe зібрано з поточної версії (scripts/build_exe.py) і його сума збігається з Igor.exe.sha256;
@@ -91,7 +92,10 @@ def main() -> None:
     problems += [f"СЕКРЕТ: {h}" for h in hits]
 
     prev = sh("git", "describe", "--tags", "--abbrev=0", check=False)
-    notes = sh("git", "log", (f"{prev}..HEAD" if prev else "-20"), "--pretty=- %s")
+    if "--notes" in sys.argv:                                  # власний текст нотаток (напр. для першого релізу)
+        notes = sys.argv[sys.argv.index("--notes") + 1]
+    else:
+        notes = sh("git", "log", (f"{prev}..HEAD" if prev else "-20"), "--pretty=- %s")
     print(f"Версія: {ver}\nКоміт: {head[:10]}\nПопередній тег: {prev or '—'}\nНотатки релізу:\n{notes}\n")
     if problems:
         print("ПРОБЛЕМИ (реліз не створено):")
