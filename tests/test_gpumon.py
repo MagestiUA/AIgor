@@ -38,10 +38,10 @@ def main() -> None:
     assert gpumon.metrics_url("", 8001) == "" and gpumon.metrics_url("не-url") == ""
     assert gpumon.metrics_url("http://h:1/v1", "") .startswith("http://h:8001/")          # порожній порт → типовий
 
-    # ряд для графіка: пропуски → 0, піки зберігаються, довжина ≤ BARS, значення 0..100
-    s = gpumon.downsample([0, None, 100, 50] * 25)
-    assert 1 <= len(s) <= gpumon.BARS and max(s) == 100 and all(0 <= x <= 100 for x in s)
-    assert gpumon.downsample(None) == [] and gpumon.downsample([None, None]) == [0, 0]
+    # ряд для графіка: пропуски лишаються None (розрив лінії), значення затиснуто в 0..100, не більше MAX_POINTS
+    s = gpumon.series([0, None, 100.04, 250, -5, "x", True] * 40)
+    assert len(s) == gpumon.MAX_POINTS and None in s and max(x for x in s if x is not None) == 100 and min(x for x in s if x is not None) == 0
+    assert gpumon.series(None) == [] and gpumon.series([None, 12.34]) == [None, 12.3]
 
     srv = HTTPServer(("127.0.0.1", 0), H)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -50,11 +50,12 @@ def main() -> None:
 
     d = gpumon.fetch(base, KEY, port)
     assert d["state"] == "ok" and d["util"] == 37.0 and d["gpu_name"] == "H100 PCIe" and d["running"] == 2
-    assert STATE["seen_auth"] == f"Bearer {KEY}" and STATE["seen_path"].startswith("/metrics.json?seconds=600")
-    v, hist = gpumon.view(d)
+    assert STATE["seen_auth"] == f"Bearer {KEY}" and STATE["seen_path"].startswith("/metrics.json?seconds=300")
+    v = gpumon.view(d)
+    hist = d["series"]
     assert v["status"].startswith("Сервер відповідає") and v["util"] == "37%" and v["temp_power"] == "42 °C · 83/350 Вт", v
     assert v["vram"] == "VRAM 72.0 / 79.6 ГіБ (90%)" and v["model"] == "запитів у роботі: 2 · KV-кеш 12%" or v["model"].startswith("запитів у роботі: 2"), v
-    assert hist and max(hist) == 100
+    assert len(hist) == 100 and max(x for x in hist if x is not None) == 100          # 5-хв ряд, піки збережено
 
     # помилки: ключ, агент ще збирає, не JSON, 500, нема зв'язку; ключ і URL у текст не потрапляють
     for mode, st in (("wait", "wait"), ("html", "error"), ("500", "error")):
@@ -69,8 +70,8 @@ def main() -> None:
     srv.shutdown()
     r = gpumon.fetch(base, KEY, port, timeout=1)                      # сервер вимкнено → «не відповідає»
     assert r["state"] == "down" and KEY not in r["msg"] and "127.0.0.1" not in r["msg"]
-    vv, hh = gpumon.view(r)
-    assert vv["status"] == "Сервер не відповідає" and vv["util"] == "" and hh == []
+    vv = gpumon.view(r)
+    assert vv["status"] == "Сервер не відповідає" and vv["util"] == "" and r["series"] == []
     assert gpumon.fetch("", KEY)["state"] == "na"
     print("OK: gpumon — URL з хоста моделі, Bearer-ключ, розбір метрик, графік, помилки без витоку ключа/URL")
 

@@ -18,10 +18,11 @@ from urllib.parse import urlparse
 import requests
 
 DEFAULT_PORT = 8001
-BARS = 30                              # скільки стовпчиків у міні-графіку
+HISTORY_S = 300                        # скільки секунд історії тягнемо для графіка (5 хв)
+MAX_POINTS = 120                       # скільки точок ряду віддаємо в браузер
 
 
-def metrics_url(base_url: str, port: int | str = DEFAULT_PORT, seconds: int = 600) -> str:
+def metrics_url(base_url: str, port: int | str = DEFAULT_PORT, seconds: int = HISTORY_S) -> str:
     host = urlparse(base_url).hostname or ""
     if not host:
         return ""
@@ -32,26 +33,22 @@ def _num(x):
     return x if isinstance(x, (int, float)) and not isinstance(x, bool) else None
 
 
-def downsample(series, n: int = BARS) -> list[int]:
-    """Ряд % (з пропусками None) → n цілих 0..100: максимум у кожному відрізку (піки важливіші за середнє)."""
-    vals = [_num(v) for v in (series or [])]
-    if not vals:
-        return []
-    out: list[int] = []
-    size = max(1, -(-len(vals) // n))                    # ceil
-    for i in range(0, len(vals), size):
-        chunk = [v for v in vals[i:i + size] if v is not None]
-        out.append(int(max(0, min(100, round(max(chunk))))) if chunk else 0)
+def series(raw, n: int = MAX_POINTS) -> list:
+    """Ряд завантаження GPU для графіка: числа 0..100, пропуски лишаються None (розрив лінії); не більше n точок."""
+    out = []
+    for v in (raw or []):
+        v = _num(v)
+        out.append(None if v is None else max(0, min(100, round(v, 1))))
     return out[-n:]
 
 
-def fetch(base_url: str, api_key: str, port: int | str = DEFAULT_PORT, seconds: int = 600,
+def fetch(base_url: str, api_key: str, port: int | str = DEFAULT_PORT, seconds: int = HISTORY_S,
           timeout: float = 4.0) -> dict:
     """Один запит до агента. Завжди повертає dict зі `state`:
     ok | wait (агент збирає дані) | auth (401) | down (нема зв'язку) | error | na (не налаштовано)."""
     out = {"state": "na", "msg": "", "ms": 0, "gpu_name": "", "util": None, "vram_pct": None,
            "vram_used_mb": None, "vram_total_mb": None, "temp": None, "power": None, "power_limit": None,
-           "running": None, "kv_pct": None, "hist": []}
+           "running": None, "kv_pct": None, "series": []}
     url = metrics_url(base_url, port, seconds)
     if not url:
         out["msg"] = "адреса сервера не налаштована"
@@ -89,7 +86,7 @@ def fetch(base_url: str, api_key: str, port: int | str = DEFAULT_PORT, seconds: 
         vram_used_mb=_num(now.get("vram_used_mb")), vram_total_mb=_num(static.get("vram_total_mb")),
         temp=_num(now.get("gpu_temp")), power=_num(now.get("gpu_power")), power_limit=_num(now.get("gpu_power_limit")),
         running=_num(vllm.get("running")), kv_pct=_num(vllm.get("kv_pct")),
-        hist=downsample(hist.get("gpu")),
+        series=series(hist.get("gpu")),
     )
     return out
 
@@ -98,8 +95,8 @@ def _f(x, nd=0):
     return "—" if x is None else (f"{x:.{nd}f}" if nd else f"{round(x):d}")
 
 
-def view(d: dict) -> tuple[dict[str, str], list[int]]:
-    """Готові рядки для панелі: {state, status, util, temp_power, vram, model} + ряд для графіка."""
+def view(d: dict) -> dict[str, str]:
+    """Готові рядки для панелі: state, status, hint, util, temp_power, vram, model, name."""
     st = d.get("state", "na")
     if st == "ok":
         status = f"Сервер відповідає · {d['ms']} мс"
@@ -122,4 +119,4 @@ def view(d: dict) -> tuple[dict[str, str], list[int]]:
             v["vram"] = f"VRAM {d['vram_used_mb'] / 1024:.1f}{tot} ГіБ{pct}"
         if d["running"] is not None:
             v["model"] = f"запитів у роботі: {_f(d['running'])}" + (f" · KV-кеш {_f(d['kv_pct'])}%" if d["kv_pct"] is not None else "")
-    return v, list(d.get("hist") or [])
+    return v

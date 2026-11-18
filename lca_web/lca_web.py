@@ -170,6 +170,54 @@ BORDER = "border-white/10"
 SERIF = {"fontFamily": "Newsreader, Georgia, serif"}
 
 
+GPU_JS = r"""
+(function(){
+  if (window.__igorGpu) return;
+  var last = null;
+  function el(id){ return document.getElementById(id); }
+  function txt(id, s){ var e = el(id); if (e) e.textContent = s || ''; }
+  function draw(){
+    var c = el('gpu-canvas'); if (!c || !last) return;
+    var dpr = window.devicePixelRatio || 1, w = c.clientWidth, h = c.clientHeight;
+    if (!w || !h) return;
+    var pw = Math.round(w * dpr), ph = Math.round(h * dpr);
+    if (c.width !== pw || c.height !== ph) { c.width = pw; c.height = ph; }
+    var g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, w, h);
+    g.strokeStyle = 'rgba(255,255,255,0.10)'; g.lineWidth = 1;
+    var y50 = Math.round(h / 2) + 0.5; g.beginPath(); g.moveTo(0, y50); g.lineTo(w, y50); g.stroke();
+    var s = last.series || [], want = Math.max(2, Math.round((last.span || 300) / 5)), cnt = Math.max(s.length, want);
+    var step = w / (cnt - 1), start = w - (s.length - 1) * step;
+    function X(i){ return start + i * step; }
+    function Y(v){ return h - 1 - (v / 100) * (h - 2); }
+    var seg = [];
+    function flush(){
+      if (seg.length) {
+        g.beginPath(); g.moveTo(X(seg[0][0]), h); for (var k = 0; k < seg.length; k++) g.lineTo(X(seg[k][0]), Y(seg[k][1]));
+        g.lineTo(X(seg[seg.length - 1][0]), h); g.closePath(); g.fillStyle = 'rgba(56,189,248,0.22)'; g.fill();
+        g.beginPath(); for (var m = 0; m < seg.length; m++) { if (m) g.lineTo(X(seg[m][0]), Y(seg[m][1])); else g.moveTo(X(seg[m][0]), Y(seg[m][1])); }
+        g.strokeStyle = '#38bdf8'; g.lineWidth = 1.5; g.stroke();
+      }
+      seg = [];
+    }
+    for (var i = 0; i < s.length; i++) { if (s[i] === null || s[i] === undefined) flush(); else seg.push([i, s[i]]); }
+    flush();
+  }
+  function render(){
+    if (!last) return;
+    var v = last.v || {};
+    txt('gpu-status', v.status); txt('gpu-util', v.util); txt('gpu-line', v.temp_power); txt('gpu-vram', v.vram);
+    txt('gpu-model', v.model); txt('gpu-hint', v.state === 'ok' ? '' : v.hint);
+    var colors = {ok: '#22c55e', wait: '#f59e0b', na: '#6b7280'};
+    var dot = el('gpu-dot'); if (dot) dot.style.backgroundColor = colors[v.state] || '#ef4444';
+    var u = el('gpu-util'); if (u) u.style.color = v.state === 'ok' ? '#7dd3fc' : '';
+    var box = el('gpu-graph'); if (box) box.style.display = v.state === 'ok' ? '' : 'none';
+    draw();
+  }
+  window.__igorGpu = function(d){ last = d; render(); };
+  window.__igorGpuRender = render;
+  window.addEventListener('resize', draw);
+})();
+"""
 STREAM_THINK_TAIL = 3000                    # скільки символів живих роздумів показуємо під час стріму
 STREAM_FLUSH_S = 0.2                       # як часто (с) оновлювати стрім відповіді/роздумів у UI
 INPUT_ID = "task-input"                    # поле вводу повідомлення (некероване)
@@ -268,8 +316,8 @@ class State(rx.State):
     # Навантаження GPU сервера (agent/gpumon.py): вмикається в Налаштуваннях, показується зверху правої панелі
     gpu_enabled: bool = False
     gpu_port: str = "8001"                 # порт агента моніторингу на сервері
-    gpu: dict[str, str] = {}               # готові рядки (gpumon.view)
-    gpu_bars: list[str] = []               # висоти стовпчиків міні-графіка, "37%"
+    # Самі показники GPU у стані НЕ зберігаються: бекенд пушить їх скриптом (window.__igorGpu) прямо в DOM картки,
+    # тож оновлення раз на 10 с не змінює жодної змінної стану й не перемальовує React-інтерфейс (ввід не підвисає).
     _update_info: dict = {}                # відповідь updater.check (backend-only: з URL-ами ресурсів)
     # планувальник-діалог (#2+#5): питання/вибір, що очікує відповіді
     has_question: bool = False
@@ -857,7 +905,10 @@ class State(rx.State):
         # Тему застосовує next-themes сам (зберігає в localStorage між перезавантаженнями);
         # set_color_mode НЕ можна викликати з бекенд-хендлера — лише шрифт через DOM.
         # PASTE_SETUP_JS — одноразово вішає document-listener вставки файлів (Ctrl+V).
-        return [rx.call_script(self.ui_font_js), rx.call_script(PASTE_SETUP_JS), rx.call_script(AGO_JS)]
+        # poll_gpu стартуємо ТУТ, а не окремо в on_load: фонова подія читає gpu_enabled, виставлений вище, а при
+        # паралельному старті могла прочитати ще старе значення й одразу вийти.
+        return [rx.call_script(self.ui_font_js), rx.call_script(PASTE_SETUP_JS), rx.call_script(AGO_JS),
+                rx.call_script(GPU_JS), State.poll_gpu]
 
     def _persist_settings(self):
         from agent import settings as S
@@ -903,8 +954,6 @@ class State(rx.State):
     def set_gpu_monitor(self, v: bool):
         self.gpu_enabled = bool(v)
         self._persist_gpu()
-        if not self.gpu_enabled:
-            self.gpu, self.gpu_bars = {}, []
         return State.poll_gpu                              # перезапускає (або зупиняє) цикл опитування
 
     @rx.event
@@ -927,18 +976,15 @@ class State(rx.State):
                 return
             eff = B.resolve()
             if eff["backend"] != "openai":
-                d = {"state": "na", "msg": "доступно лише для серверного бекенду (OpenAI API)", "hist": []}
+                d = {"state": "na", "msg": "доступно лише для серверного бекенду (OpenAI API)", "series": []}
             else:
                 key = eff.get("api_key") or os.environ.get(config.REMOTE_KEY_ENV, "")     # як і для виклику моделі
                 d = await asyncio.to_thread(lambda: gpumon.fetch(eff["base_url"], key, port))
-            view, hist = gpumon.view(d)
-            bars = [f"{max(2, h)}%" for h in hist]
-            async with self:
-                if me == _GPU_GEN and self.gpu_enabled:       # поки чекали, могли вимкнути/перезапустити
-                    if view != self.gpu:
-                        self.gpu = view
-                    if bars != self.gpu_bars:
-                        self.gpu_bars = bars
+            if me != _GPU_GEN:                                # поки чекали, могли вимкнути/перезапустити
+                return
+            payload = {"v": gpumon.view(d), "series": d.get("series") or [], "span": gpumon.HISTORY_S}
+            # НЕ через стан: подія-скрипт оновлює DOM картки напряму, React при цьому нічого не перемальовує
+            yield rx.call_script("window.__igorGpu&&window.__igorGpu(" + json.dumps(payload, ensure_ascii=False) + ")")
             await asyncio.sleep(GPU_POLL_S)
 
     # ── Підключення до LLM ─────────────────────────────────────────────────────
@@ -3445,32 +3491,33 @@ def _change(r: dict) -> rx.Component:
 
 
 def gpu_card() -> rx.Component:
-    """Верх правої панелі: чи відповідає сервер і навантаження GPU (вмикається в Налаштуваннях)."""
-    ok = State.gpu["state"] == "ok"
-    dot = rx.cond(ok, "bg-green-500", rx.cond(State.gpu["state"] == "wait", "bg-amber-500", "bg-red-500"))
+    """Верх правої панелі: чи відповідає сервер і навантаження GPU (вмикається в Налаштуваннях).
+    Картка СТАТИЧНА: текст і графік (canvas, 5 хв) оновлює скрипт GPU_JS, який бекенд викликає подією
+    (poll_gpu) — без змінних стану, тож React не перемальовує інтерфейс і ввід не підвисає."""
     body = rx.vstack(
-        rx.hstack(rx.box(class_name=dot + " w-2.5 h-2.5 rounded-full shrink-0"),
-                  rx.text(State.gpu["status"], class_name="text-sm text-gray-200"),
+        rx.hstack(rx.box(id="gpu-dot", class_name="w-2.5 h-2.5 rounded-full shrink-0",
+                         style={"backgroundColor": "#6b7280"}),
+                  rx.text("Опитую сервер…", id="gpu-status", class_name="text-sm text-gray-200"),
                   class_name="items-center gap-2 w-full"),
-        rx.cond(
-            ok,
-            rx.vstack(
-                rx.hstack(rx.text("ГПУ", class_name="text-sm text-gray-500"), rx.spacer(),
-                          rx.text(State.gpu["util"], class_name="text-lg font-mono text-sky-300"),
-                          class_name="w-full items-end"),
-                rx.hstack(
-                    rx.foreach(State.gpu_bars, lambda h: rx.box(style={"height": h}, class_name="flex-1 bg-sky-400/70 rounded-sm")),
-                    class_name="w-full h-10 items-end gap-px", style={"backgroundColor": "rgba(255,255,255,0.04)"}),
-                rx.text(State.gpu["temp_power"], class_name="text-xs text-gray-400 font-mono"),
-                rx.text(State.gpu["vram"], class_name="text-xs text-gray-400 font-mono"),
-                rx.cond(State.gpu["model"] != "", rx.text(State.gpu["model"], class_name="text-xs text-gray-400")),
-                rx.text("VRAM ~90% — норма: vLLM резервує пам'ять наперед. Навантаження — це ГПУ та Вт.",
-                        class_name="text-xs text-gray-600"),
-                gap="1", class_name="w-full"),
-            rx.text(State.gpu["hint"], class_name="text-xs text-gray-500"),
-        ),
-        gap="2", class_name="w-full")
-    return rx.cond(State.gpu_enabled & (State.gpu.length() > 0), _section("Сервер", body), rx.fragment())
+        rx.vstack(
+            rx.hstack(rx.text("ГПУ · останні 5 хв", class_name="text-xs text-gray-500"), rx.spacer(),
+                      rx.text("", id="gpu-util", class_name="text-lg font-mono"),
+                      class_name="w-full items-end"),
+            rx.el.canvas(id="gpu-canvas", class_name="w-full rounded",
+                         style={"height": "64px", "display": "block", "backgroundColor": "rgba(255,255,255,0.04)"}),
+            rx.hstack(rx.text("−5 хв", class_name="text-[10px] text-gray-600"), rx.spacer(),
+                      rx.text("50%", class_name="text-[10px] text-gray-600"), rx.spacer(),
+                      rx.text("зараз", class_name="text-[10px] text-gray-600"), class_name="w-full"),
+            rx.text("", id="gpu-line", class_name="text-xs text-gray-400 font-mono"),
+            rx.text("", id="gpu-vram", class_name="text-xs text-gray-400 font-mono"),
+            rx.text("", id="gpu-model", class_name="text-xs text-gray-400"),
+            rx.text("VRAM ~90% — норма: vLLM резервує пам'ять наперед. Навантаження — це ГПУ та Вт.",
+                    class_name="text-xs text-gray-600"),
+            id="gpu-graph", gap="1", class_name="w-full"),
+        rx.text("", id="gpu-hint", class_name="text-xs text-gray-500"),
+        gap="2", class_name="w-full",
+        on_mount=rx.call_script("window.__igorGpuRender&&window.__igorGpuRender()"))   # картку могли перемонтувати
+    return rx.cond(State.gpu_enabled, _section("Сервер", body), rx.fragment())
 
 
 def context_panel() -> rx.Component:
@@ -3586,5 +3633,4 @@ app = rx.App(
     head_components=[rx.el.style("html,body{margin:0;height:100%;overflow:hidden}")],
 )
 app.add_page(index, title=f"Ігорь! · {logs.app_version()}",
-             on_load=[State.load_sessions, State.load_settings, State.check_updates(True), State.poll_updates,
-                      State.poll_gpu])
+             on_load=[State.load_sessions, State.load_settings, State.check_updates(True), State.poll_updates])
