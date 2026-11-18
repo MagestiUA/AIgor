@@ -3150,7 +3150,9 @@ def index() -> rx.Component:
         project_dialog(),
         move_dialog(),
         confirm_dialog(),
-        class_name="h-screen w-screen overflow-hidden",
+        # fixed inset-0, а не h-screen/w-screen: 100vw включає смугу прокрутки й дає зайвий скрол документа;
+        # на широких моніторах після розгортання вікна це давало зсув інтерфейсу й білі поля.
+        class_name="fixed inset-0 overflow-hidden",
         style={"backgroundColor": BG},
         spacing="0",
     )
@@ -3158,6 +3160,7 @@ def index() -> rx.Component:
 
 app = rx.App(
     stylesheets=["https://fonts.googleapis.com/css2?family=Newsreader:ital@0;1&display=swap"],
+    head_components=[rx.el.style("html,body{margin:0;height:100%;overflow:hidden}")],
 )
 app.add_page(index, title=f"Ігорь! · {logs.app_version()}",
              on_load=[State.load_sessions, State.load_settings])

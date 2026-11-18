@@ -202,6 +202,16 @@ def _open_window(url: str, log) -> None:
     # closing — синхронна подія (блокує закриття до завершення хендлера),
     # тож геометрія читається ДО того, як вікно (і його властивості) зникне.
     window.events.closing += lambda: _save_geometry(window)
+
+    def _relayout(*_a) -> None:
+        """WebView2 на широких моніторах інколи не перераховує розкладку після розгортання/зміни вікна
+        (інтерфейс жмається в кут, решта біла) — штовхаємо сторінку подією resize."""
+        try:
+            window.evaluate_js("window.dispatchEvent(new Event('resize'))")
+        except Exception:                                   # noqa: BLE001
+            pass
+    for _ev in (window.events.maximized, window.events.restored, window.events.resized, window.events.shown):
+        _ev += _relayout
     from agent import serve
     icon = serve.bundle_root() / "assets" / "igor.ico"       # іконка вікна (у .exe беремо з вбудованих assets)
     webview.start(icon=str(icon) if icon.is_file() else None)
