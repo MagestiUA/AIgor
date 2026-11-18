@@ -1,4 +1,4 @@
-"""Збірка одного файлу dist/Igor_<версія>.exe (PyInstaller --onefile).
+"""Збірка одного файлу dist/Igor.exe (PyInstaller --onefile) + Igor.exe.sha256 + Igor.version.
 
 Запуск (інтерпретатором ЗБІРНОГО середовища, де стоять requirements + pyinstaller):
     python scripts/build_exe.py            # збірка з поточної версії (файл VERSION)
@@ -10,7 +10,7 @@
  2. `reflex export --frontend-only` у stage з сентинелом замість адреси бекенда
     (agent/serve.py підставить реальний порт при запуску) — Node/Bun потрібні лише тут.
  3. PyInstaller: код + залежності + зібраний фронтенд (web_client) + rxconfig/assets/VERSION.
-Результат: dist/Igor_<версія>.exe
+Результат: dist/Igor.exe (повний випуск з публікацією: scripts/release.py)
 """
 from __future__ import annotations
 
@@ -64,8 +64,8 @@ def main() -> None:
     if "--bump" in args:
         ver = bump(ver)
         vfile.write_text(ver, encoding="utf-8")
-    name = f"Igor_{ver}"
-    print(f"=== Збірка {name}.exe ===", flush=True)
+    name = "Igor"                       # файл без версії в назві; версія — у заголовку вікна й у релізі
+    print(f"=== Збірка {name}.exe ({ver}) ===", flush=True)
 
     # 1. stage
     # Проміжна збірка — поза проєктом (%TEMP%): IDE (PyCharm) індексує теку проєкту й тримає
@@ -121,13 +121,10 @@ def main() -> None:
     run(cmd, cwd=ROOT)
     exe = ROOT / "dist" / f"{name}.exe"
     if exe.exists():
-        # Файл для розсилки й самооновлення — БЕЗ версії в назві (версія — у заголовку вікна), + контрольна сума.
         import hashlib
-        plain = ROOT / "dist" / "Igor.exe"
-        shutil.copy2(exe, plain)
         (ROOT / "dist" / "Igor.exe.sha256").write_text(
-            f"{hashlib.sha256(plain.read_bytes()).hexdigest()}  Igor.exe\n", encoding="ascii")
-        print(f"Для розсилки/релізу: {plain} + Igor.exe.sha256 (версія {ver})")
+            f"{hashlib.sha256(exe.read_bytes()).hexdigest()}  Igor.exe\n", encoding="ascii")
+        (ROOT / "dist" / "Igor.version").write_text(ver, encoding="utf-8")    # для перевірки перед публікацією
     print(f"\nГОТОВО: {exe}  ({exe.stat().st_size / 1_048_576:.0f} МБ)" if exe.exists() else "\nexe не створено")
 
 

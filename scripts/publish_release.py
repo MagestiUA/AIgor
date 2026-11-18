@@ -64,6 +64,16 @@ def scan_sources(secrets: list[str]) -> list[str]:
     return hits
 
 
+def scan_history(secrets: list[str]) -> list[str]:
+    """Значення з .env у ВСІЙ історії (усі гілки/теги): публічний репозиторій не має їх містити."""
+    hits = []
+    for i, v in enumerate(secrets):
+        n = len(sh("git", "log", "--all", "-S" + v, "--format=%h", check=False).split())
+        if n:
+            hits.append(f"історія git: значення #{i} з .env є в {n} комітах")
+    return hits
+
+
 def main() -> None:
     go = "--go" in sys.argv
     ver = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -76,9 +86,9 @@ def main() -> None:
         real = hashlib.sha256(exe.read_bytes()).hexdigest()
         if real not in shaf.read_text(encoding="ascii"):
             problems.append("сума dist/Igor.exe не збігається з Igor.exe.sha256 — перезберіть")
-        versioned = ROOT / "dist" / f"Igor_{ver}.exe"
-        if not versioned.is_file() or hashlib.sha256(versioned.read_bytes()).hexdigest() != real:
-            problems.append(f"dist/Igor.exe не відповідає dist/Igor_{ver}.exe — зібрано не з поточної версії {ver}?")
+        mark = ROOT / "dist" / "Igor.version"
+        if not mark.is_file() or mark.read_text(encoding="utf-8").strip() != ver:
+            problems.append(f"dist/Igor.exe зібрано не з поточної версії {ver} — перезберіть")
 
     if sh("git", "status", "--porcelain", "--untracked-files=no"):
         problems.append("є незакомічені зміни в відстежуваних файлах")
@@ -88,7 +98,8 @@ def main() -> None:
     if sh("git", "tag", "--list", ver):
         problems.append(f"тег {ver} уже існує")
 
-    hits = scan_sources(env_secrets())
+    sec = env_secrets()
+    hits = scan_sources(sec) + scan_history(sec)
     problems += [f"СЕКРЕТ: {h}" for h in hits]
 
     prev = sh("git", "describe", "--tags", "--abbrev=0", check=False)
