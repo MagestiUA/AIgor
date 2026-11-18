@@ -167,6 +167,18 @@ if exist "%IGOR_EXE%" start "" "%IGOR_EXE%"
 """
 
 
+def fresh_env(base: dict | None = None) -> dict:
+    """Середовище для запуску НОВОЇ exe після підміни. PyInstaller (onefile) лишає в середовищі змінні
+    (`_PYI_*`, `_MEIPASS2`), за якими процес-нащадок із ТИМ САМИМ шляхом exe вважає себе дочірнім і бере
+    ресурси з розпаковки батька — а батько на виході її видаляє (живий кейс b_0.0.19→b_0.0.20: нова exe
+    стартувала зі старою VERSION і падала на відсутньому rxconfig.py). Тому чистимо їх і просимо
+    завантажувач розпакуватись заново."""
+    env = {k: v for k, v in (base if base is not None else os.environ).items()
+           if k != "_MEIPASS2" and not k.startswith("_PYI_")}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return env
+
+
 def launch_pending_update(log=None) -> bool:
     """Лаунчер після закриття вікна: якщо є прапорець і перевірений файл — запустити скрипт підміни.
     Шляхи йдуть через змінні середовища (скрипт лишається чистим ASCII — кирилиця в шляхах не страшна)."""
@@ -182,7 +194,7 @@ def launch_pending_update(log=None) -> bool:
         STATE_DIR.mkdir(parents=True, exist_ok=True)
         script = STATE_DIR / "apply_update.cmd"
         script.write_text(_SCRIPT, encoding="ascii")
-        env = {**os.environ, "IGOR_EXE": str(exe), "IGOR_NEW": str(new), "IGOR_OLD": str(exe) + ".old"}
+        env = {**fresh_env(), "IGOR_EXE": str(exe), "IGOR_NEW": str(new), "IGOR_OLD": str(exe) + ".old"}
         flags = (getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
                  | getattr(subprocess, "CREATE_NO_WINDOW", 0))
         subprocess.Popen(["cmd", "/c", str(script)], env=env, creationflags=flags, close_fds=True)

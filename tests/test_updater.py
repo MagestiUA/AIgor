@@ -2,6 +2,7 @@
 Сервер GitHub підмінено локальним HTTP-сервером; усі шляхи — у тимчасовій теці (реальні дані не чіпаємо)."""
 import hashlib
 import json
+import os
 import tempfile
 import threading
 import time
@@ -10,7 +11,8 @@ from pathlib import Path
 
 from agent import updater
 
-NEW_BODY = b"@echo off\r\necho started> \"%~dp0marker.txt\"\r\n" + b"REM padding\r\n" * 5000
+NEW_BODY = (b"@echo off\r\necho started pyi=[%_PYI_APPLICATION_HOME_DIR%] mei=[%_MEIPASS2%] reset=[%PYINSTALLER_RESET_ENVIRONMENT%]"
+            b"> \"%~dp0marker.txt\"\r\n" + b"REM padding\r\n" * 5000)
 GOOD_SHA = hashlib.sha256(NEW_BODY).hexdigest()
 STATE = {"sha": GOOD_SHA, "release": 200}
 
@@ -95,6 +97,13 @@ def main() -> None:
     assert exe.read_bytes().startswith(b"@echo off\r\nREM old")
     updater.request_restart()
     assert updater.restart_requested()
+    # середовище «старої» onefile-exe: нова версія НЕ має його успадкувати (інакше візьме ресурси з _MEI батька,
+    # яку той видаляє на виході — живий кейс b_0.0.19→b_0.0.20)
+    os.environ["_PYI_APPLICATION_HOME_DIR"] = r"C:\fake\_MEI123"
+    os.environ["_MEIPASS2"] = r"C:\fake\_MEI123"
+    fe = updater.fresh_env()
+    assert "_PYI_APPLICATION_HOME_DIR" not in fe and "_MEIPASS2" not in fe and fe["PYINSTALLER_RESET_ENVIRONMENT"] == "1"
+    assert fe["PATH"] == os.environ["PATH"]                                    # решта середовища збережена
     assert updater.launch_pending_update()
     marker = d / "marker.txt"
     for _ in range(100):
@@ -102,6 +111,12 @@ def main() -> None:
             break
         time.sleep(0.2)
     assert marker.exists(), "нова версія не запустилась після підміни"
+    time.sleep(0.5)
+    seen_env = marker.read_text(errors="ignore")
+    assert "pyi=[]" in seen_env.replace("%_PYI_APPLICATION_HOME_DIR%", "") or "_MEI123" not in seen_env, seen_env
+    assert "_MEI123" not in seen_env and "reset=[1]" in seen_env, seen_env
+    os.environ.pop("_PYI_APPLICATION_HOME_DIR", None)
+    os.environ.pop("_MEIPASS2", None)
     assert exe.read_bytes() == NEW_BODY, "exe не підмінено"
     assert (d / "fake.cmd.old").read_bytes() == b"@echo off\r\nREM old\r\n", "стара версія для відкату не збережена"
     assert not (d / "fake.cmd.new").exists() and not updater.FLAG.exists()
