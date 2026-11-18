@@ -160,7 +160,8 @@ BORDER = "border-white/10"
 SERIF = {"fontFamily": "Newsreader, Georgia, serif"}
 
 
-INPUT_ID = "task-input"                     # поле вводу повідомлення (некероване)
+STREAM_FLUSH_S = 0.2                        # як часто (с) оновлювати стрім відповіді/роздумів у UI
+INPUT_ID = "task-input"                    # поле вводу повідомлення (некероване)
 CLEAR_INPUT_JS = (f"(function(){{var e=document.getElementById('{INPUT_ID}');"
                   "if(e){e.value='';e.style.height='';}})()")
 
@@ -1472,6 +1473,12 @@ class State(rx.State):
         stats = None
         tool_calls = None
         counted = 0
+        # Токени копимо ЛОКАЛЬНО й віддаємо в стан не частіше за STREAM_FLUSH_S: кожне оновлення стану —
+        # це повна передача stream_content у браузер + перерозбір markdown усього тексту + перемальовка
+        # сторінки. Робити це на кожен токен (десятки разів на секунду) — квадратичне навантаження й лаги.
+        acc_c, acc_t = "", ""
+        pushed_c = pushed_t = 0                     # скільки символів уже віддано в стан
+        last_flush = 0.0
         while True:
             if _STOP_EVENTS.get(cid, None) and _STOP_EVENTS[cid].is_set():
                 break
@@ -1482,16 +1489,24 @@ class State(rx.State):
                 stats = ev.get("stats")
                 tool_calls = ev.get("tool_calls")
                 break
-            async with self:
-                self.stream_content += ev["content"]
-                self.stream_thinking += ev["thinking"]
-                if ev["content"]:
-                    counted += 1
+            acc_c += ev["content"]
+            acc_t += ev["thinking"]
+            if ev["content"]:
+                counted += 1
+            now = time.monotonic()
+            if now - last_flush >= STREAM_FLUSH_S and (len(acc_c) != pushed_c or len(acc_t) != pushed_t):
+                last_flush = now
+                pushed_c, pushed_t = len(acc_c), len(acc_t)
+                async with self:
+                    self.stream_content = acc_c
+                    self.stream_thinking = acc_t
                     self.tok_out = base_out + counted
                     el = time.time() - t0
                     if el > 0:
                         self.tok_tps = round(self.tok_out / el, 1)
         async with self:
+            self.stream_content = acc_c                  # хвіст, що не встиг пройти throttle
+            self.stream_thinking = acc_t
             if stats:
                 self.tok_prompt += stats.get("prompt", 0)
                 self.tok_out = base_out + stats.get("out", counted)
