@@ -186,7 +186,9 @@ def restore_input_js(text: str) -> str:
 
 
 UPDATE_POLL_S = float(os.environ.get("IGOR_UPDATE_POLL_S") or 120)   # період перевірки оновлень, с (поки активна розробка — 2 хв; потім 900–3600)
-_POLL_GEN = 0                               # поколінна відмітка циклу перевірки: новий on_load витісняє старий
+GPU_POLL_S = 10                             # як часто опитувати агент моніторингу GPU, с
+_GPU_GEN = 0                                # поколінна відмітка циклу опитування GPU (новий запуск витісняє старий)
+_POLL_GEN = 0                              # поколінна відмітка циклу перевірки: новий on_load витісняє старий
 _UPDATE_CHECKED = False                 # тиха перевірка оновлень на старті — раз на запуск
 
 
@@ -263,6 +265,11 @@ class State(rx.State):
     update_ok: bool = True                 # колір повідомлення (false — помилка)
     update_busy: bool = False              # іде перевірка або завантаження
     update_dismissed: bool = False         # банер закрито до наступного запуску
+    # Навантаження GPU сервера (agent/gpumon.py): вмикається в Налаштуваннях, показується зверху правої панелі
+    gpu_enabled: bool = False
+    gpu_port: str = "8001"                 # порт агента моніторингу на сервері
+    gpu: dict[str, str] = {}               # готові рядки (gpumon.view)
+    gpu_bars: list[str] = []               # висоти стовпчиків міні-графіка, "37%"
     _update_info: dict = {}                # відповідь updater.check (backend-only: з URL-ами ресурсів)
     # планувальник-діалог (#2+#5): питання/вибір, що очікує відповіді
     has_question: bool = False
@@ -840,6 +847,8 @@ class State(rx.State):
         self.llm_backend = eff["backend"]
         self.llm_model = d.get("llm_model", "")
         self.llm_key_saved = bool(d.get("llm_api_key"))
+        self.gpu_enabled = bool(d.get("gpu_monitor", False))
+        self.gpu_port = str(d.get("gpu_monitor_port") or "8001")
         self.llm_host, self.llm_port = d.get("llm_host", ""), str(d.get("llm_port", ""))
         if not self.llm_host and eff["backend"] == "openai":      # дефолт із .env/config
             from urllib.parse import urlparse
@@ -884,6 +893,53 @@ class State(rx.State):
         self.font_ui = max(11, min(24, int(val)))     # збігається зі слайдером 11..24
         self._persist_settings()
         return rx.call_script(self.ui_font_js)
+
+    # ── Навантаження GPU сервера ────────────────────────────────────────────────
+    def _persist_gpu(self):
+        from agent import settings as S
+        S.save({**S.load(), "gpu_monitor": self.gpu_enabled, "gpu_monitor_port": self.gpu_port})
+
+    @rx.event
+    def set_gpu_monitor(self, v: bool):
+        self.gpu_enabled = bool(v)
+        self._persist_gpu()
+        if not self.gpu_enabled:
+            self.gpu, self.gpu_bars = {}, []
+        return State.poll_gpu                              # перезапускає (або зупиняє) цикл опитування
+
+    @rx.event
+    def set_gpu_port(self, v: str):
+        self.gpu_port = "".join(ch for ch in v if ch.isdigit())[:5]
+        self._persist_gpu()
+
+    @rx.event(background=True)
+    async def poll_gpu(self):
+        """Цикл опитування агента моніторингу (раз на GPU_POLL_S). Запускається з on_load і при перемиканні
+        налаштування; кожен запуск витісняє попередній цикл (_GPU_GEN). Вимкнено → очищає панель й виходить."""
+        global _GPU_GEN
+        from agent import gpumon
+        _GPU_GEN += 1
+        me = _GPU_GEN
+        while me == _GPU_GEN:
+            async with self:
+                enabled, port = self.gpu_enabled, self.gpu_port
+            if not enabled:
+                return
+            eff = B.resolve()
+            if eff["backend"] != "openai":
+                d = {"state": "na", "msg": "доступно лише для серверного бекенду (OpenAI API)", "hist": []}
+            else:
+                key = eff.get("api_key") or os.environ.get(config.REMOTE_KEY_ENV, "")     # як і для виклику моделі
+                d = await asyncio.to_thread(lambda: gpumon.fetch(eff["base_url"], key, port))
+            view, hist = gpumon.view(d)
+            bars = [f"{max(2, h)}%" for h in hist]
+            async with self:
+                if me == _GPU_GEN and self.gpu_enabled:       # поки чекали, могли вимкнути/перезапустити
+                    if view != self.gpu:
+                        self.gpu = view
+                    if bars != self.gpu_bars:
+                        self.gpu_bars = bars
+            await asyncio.sleep(GPU_POLL_S)
 
     # ── Підключення до LLM ─────────────────────────────────────────────────────
     @rx.event
@@ -2641,6 +2697,28 @@ def llm_connection_section() -> rx.Component:
     )
 
 
+def gpu_settings_section() -> rx.Component:
+    """Налаштування -> Навантаження сервера: вмикач панелі GPU та порт агента моніторингу."""
+    return rx.vstack(
+        rx.text("Моніторинг сервера", class_name="text-xs text-gray-500 uppercase tracking-wide"),
+        rx.hstack(
+            rx.switch(checked=State.gpu_enabled, on_change=State.set_gpu_monitor, size="2"),
+            rx.text("Відображати навантаження ГПУ", class_name="text-sm text-gray-300"),
+            class_name="items-center gap-3"),
+        rx.text("Якщо на сервері піднято сумісний агент моніторингу навантаження: раз на 10 с Ігорь читає "
+                "GET /metrics.json (той самий ключ, що й для моделі) і показує зверху правої панелі, чи "
+                "відповідає сервер та навантаження ГПУ (завантаження, Вт, температура, VRAM). Адреса сервера — "
+                "з підключення до LLM; працює лише з бекендом «Сервер (OpenAI API)».",
+                class_name="text-xs text-gray-500"),
+        rx.cond(State.gpu_enabled,
+                rx.hstack(rx.text("Порт агента", class_name="text-sm text-gray-300 w-24 shrink-0"),
+                          rx.input(value=State.gpu_port, on_change=State.set_gpu_port, placeholder="8001",
+                                   class_name="flex-1"),
+                          class_name="items-center gap-3 w-full")),
+        gap="2", class_name="w-full mb-4",
+    )
+
+
 def update_section() -> rx.Component:
     """Налаштування -> Оновлення: поточна версія, ручна перевірка, кнопка «Оновити»."""
     return rx.vstack(
@@ -2716,6 +2794,7 @@ def settings_dialog() -> rx.Component:
                     class_name="w-full items-center mb-4",
                 ),
                 llm_connection_section(),
+                gpu_settings_section(),
                 update_section(),
                 # Тема
                 rx.text("Тема", class_name="text-xs text-gray-500 uppercase tracking-wide mb-1"),
@@ -3365,6 +3444,35 @@ def _change(r: dict) -> rx.Component:
         class_name="items-start gap-2 w-full")
 
 
+def gpu_card() -> rx.Component:
+    """Верх правої панелі: чи відповідає сервер і навантаження GPU (вмикається в Налаштуваннях)."""
+    ok = State.gpu["state"] == "ok"
+    dot = rx.cond(ok, "bg-green-500", rx.cond(State.gpu["state"] == "wait", "bg-amber-500", "bg-red-500"))
+    body = rx.vstack(
+        rx.hstack(rx.box(class_name=dot + " w-2.5 h-2.5 rounded-full shrink-0"),
+                  rx.text(State.gpu["status"], class_name="text-sm text-gray-200"),
+                  class_name="items-center gap-2 w-full"),
+        rx.cond(
+            ok,
+            rx.vstack(
+                rx.hstack(rx.text("ГПУ", class_name="text-sm text-gray-500"), rx.spacer(),
+                          rx.text(State.gpu["util"], class_name="text-lg font-mono text-sky-300"),
+                          class_name="w-full items-end"),
+                rx.hstack(
+                    rx.foreach(State.gpu_bars, lambda h: rx.box(style={"height": h}, class_name="flex-1 bg-sky-400/70 rounded-sm")),
+                    class_name="w-full h-10 items-end gap-px", style={"backgroundColor": "rgba(255,255,255,0.04)"}),
+                rx.text(State.gpu["temp_power"], class_name="text-xs text-gray-400 font-mono"),
+                rx.text(State.gpu["vram"], class_name="text-xs text-gray-400 font-mono"),
+                rx.cond(State.gpu["model"] != "", rx.text(State.gpu["model"], class_name="text-xs text-gray-400")),
+                rx.text("VRAM ~90% — норма: vLLM резервує пам'ять наперед. Навантаження — це ГПУ та Вт.",
+                        class_name="text-xs text-gray-600"),
+                gap="1", class_name="w-full"),
+            rx.text(State.gpu["hint"], class_name="text-xs text-gray-500"),
+        ),
+        gap="2", class_name="w-full")
+    return rx.cond(State.gpu_enabled & (State.gpu.length() > 0), _section("Сервер", body), rx.fragment())
+
+
 def context_panel() -> rx.Component:
     """Постійна права панель (як у Claude Code): середовище, контекст (що займає вікно
     моделі + дані про стиснення), теки/файли чату, зміни в git. Ховається на вузьких вікнах."""
@@ -3412,6 +3520,7 @@ def context_panel() -> rx.Component:
     return rx.box(
         rx.vstack(
             rx.heading("Ігорь", size="3", class_name="mb-1"),
+            gpu_card(),
             _section("Середовище", rx.foreach(State.env_rows, _kv)),
             _section("Контекст", context),
             rx.cond(State.folder_rows.length() > 0,
@@ -3477,4 +3586,5 @@ app = rx.App(
     head_components=[rx.el.style("html,body{margin:0;height:100%;overflow:hidden}")],
 )
 app.add_page(index, title=f"Ігорь! · {logs.app_version()}",
-             on_load=[State.load_sessions, State.load_settings, State.check_updates(True), State.poll_updates])
+             on_load=[State.load_sessions, State.load_settings, State.check_updates(True), State.poll_updates,
+                      State.poll_gpu])
