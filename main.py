@@ -279,7 +279,21 @@ def _open_window(url: str, log) -> None:
         return h
     for _name in ("shown", "loaded", "maximized", "restored", "resized"):
         getattr(window.events, _name).__iadd__(_on(_name))
-    from agent import serve
+    from agent import serve, updater
+
+    def _watch_update_flag() -> None:
+        """UI (в іншому процесі) просить оновитись: вікно закривається штатно (зберігається геометрія),
+        а підміну exe після зупинки сервера робить _run_prod."""
+        while True:
+            time.sleep(1.0)
+            try:
+                if updater.restart_requested():
+                    log.info("запит на оновлення — закриваю вікно")
+                    window.destroy()
+                    return
+            except Exception:                               # noqa: BLE001
+                return
+    threading.Thread(target=_watch_update_flag, daemon=True, name="update-flag").start()
     icon = serve.bundle_root() / "assets" / "igor.ico"       # іконка вікна (у .exe беремо з вбудованих assets)
     webview.start(icon=str(icon) if icon.is_file() else None)
     log.info("вікно закрито користувачем")
@@ -302,6 +316,8 @@ def _run_prod(no_window: bool) -> None:
     cmd = ([sys.executable, "--serve", str(port)] if FROZEN
            else [sys.executable, str(ROOT / "main.py"), "--serve", str(port)])
     log.info("запуск (prod), порт=%d, frozen=%s", port, FROZEN)
+    from agent import updater
+    updater.clear_stale()
     proc, _q, srv_state = _start_proc(cmd, cwd=None if FROZEN else str(ROOT))
     try:
         if not _wait_ping(port, proc):
@@ -323,6 +339,7 @@ def _run_prod(no_window: bool) -> None:
         log.info("зупиняю сервер (код виходу=%s)", proc.poll())
         _stop_server(proc)
         _stop_ollama(srv_state.get("ollama_pid"))
+        updater.launch_pending_update(log)             # якщо користувач натиснув «Оновити» — підмінити exe й запустити нову
 
 
 def main() -> None:

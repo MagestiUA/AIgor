@@ -159,6 +159,9 @@ BORDER = "border-white/10"
 SERIF = {"fontFamily": "Newsreader, Georgia, serif"}
 
 
+_UPDATE_CHECKED = False                    # тиха перевірка оновлень на старті — раз на запуск
+
+
 class State(rx.State):
     sessions: list[dict] = []
     mode: str = "code"                     # активний режим: "code" (агент) | "chat" (легкий чат)
@@ -222,6 +225,16 @@ class State(rx.State):
     llm_test_msg: str = ""
     llm_test_ok: bool = False
     llm_testing: bool = False
+    # самооновлення (agent/updater.py)
+    app_ver: str = ""
+    update_available: bool = False         # на GitHub є новіша версія
+    update_latest: str = ""
+    update_notes: str = ""
+    update_msg: str = ""                   # результат перевірки / хід завантаження
+    update_ok: bool = True                 # колір повідомлення (false — помилка)
+    update_busy: bool = False              # іде перевірка або завантаження
+    update_dismissed: bool = False         # банер закрито до наступного запуску
+    _update_info: dict = {}                # відповідь updater.check (backend-only: з URL-ами ресурсів)
     # планувальник-діалог (#2+#5): питання/вибір, що очікує відповіді
     has_question: bool = False
     q_text: str = ""
@@ -775,6 +788,7 @@ class State(rx.State):
         from agent import settings as S
         d = S.load()
         self.theme = d.get("theme", "auto")
+        self.app_ver = logs.app_version()
         self.font_chat = d.get("font_chat", 14)
         self.font_ui = d.get("font_ui", 13)
         from agent import backend
@@ -879,6 +893,80 @@ class State(rx.State):
         except Exception as e:
             _log.exception("не вдалось зібрати діагностику")
             self.llm_test_msg, self.llm_test_ok = f"Не вдалось зібрати діагностику: {e}", False
+
+    # ── Оновлення ────────────────────────────────────────────────────────────────
+    @rx.event(background=True)
+    async def check_updates(self, silent: bool = False):
+        """Спитати GitHub про нову версію. silent=True (старт): без повідомлень, якщо нових нема чи збій мережі."""
+        from agent import updater
+        global _UPDATE_CHECKED
+        if silent:
+            if _UPDATE_CHECKED:                                 # тиха перевірка — раз на запуск, а не на кожне перезавантаження сторінки
+                return
+            _UPDATE_CHECKED = True
+        async with self:
+            if self.update_busy:
+                return
+            self.update_busy = True
+            if not silent:
+                self.update_msg, self.update_ok = "Перевіряю…", True
+            cur = logs.app_version()
+        info = await asyncio.to_thread(lambda: updater.check(cur, timeout=4.0 if silent else 8.0))
+        async with self:
+            self.update_busy = False
+            self.app_ver = cur
+            if info["newer"]:
+                self._update_info = info
+                self.update_available, self.update_latest = True, info["latest"]
+                self.update_notes = info["notes"]
+                self.update_dismissed = False
+                self.update_msg, self.update_ok = f"Доступна нова версія {info['latest']} (у вас {cur}).", True
+            elif silent:
+                pass
+            elif info["ok"]:
+                self.update_available = False
+                self.update_msg, self.update_ok = ((f"У вас остання версія ({cur}).") if info["latest"]
+                                                   else "Опублікованих версій на GitHub ще немає."), True
+            else:
+                self.update_msg, self.update_ok = f"Не вдалося перевірити оновлення: {info['error']}", False
+
+    @rx.event
+    def dismiss_update(self):
+        self.update_dismissed = True
+
+    @rx.event(background=True)
+    async def install_update(self):
+        """Завантажити нову exe, звірити суму й попросити лаунчер закритись та підмінити файл."""
+        from agent import updater
+        async with self:
+            if self.update_busy or not self.update_available:
+                return
+            info = dict(self._update_info)
+            self.update_busy = True
+            self.update_msg, self.update_ok = "Завантажую оновлення…", True
+        ok, why = updater.can_self_update()
+        if not ok:
+            async with self:
+                self.update_busy, self.update_msg, self.update_ok = False, why, False
+            return
+        box = {"p": 0.0}
+        task = asyncio.create_task(asyncio.to_thread(
+            lambda: updater.download(info, progress=lambda p: box.__setitem__("p", p))))
+        while not task.done():
+            await asyncio.sleep(0.5)
+            async with self:
+                self.update_msg = f"Завантажую оновлення… {int(box['p'] * 100)}%"
+        try:
+            await task
+        except RuntimeError as e:
+            _log.error("оновлення не завантажено: %s", e)
+            async with self:
+                self.update_busy, self.update_msg, self.update_ok = False, str(e), False
+            return
+        _log.info("оновлення %s завантажено й перевірено — перезапуск", info.get("latest"))
+        async with self:
+            self.update_msg, self.update_ok = "Оновлення завантажено. Перезапускаю Ігоря…", True
+        updater.request_restart()
 
     @rx.event(background=True)
     async def test_llm_connection(self):
@@ -2389,6 +2477,53 @@ def llm_connection_section() -> rx.Component:
     )
 
 
+def update_section() -> rx.Component:
+    """Налаштування -> Оновлення: поточна версія, ручна перевірка, кнопка «Оновити»."""
+    return rx.vstack(
+        rx.text("Оновлення", class_name="text-xs text-gray-500 uppercase tracking-wide"),
+        rx.hstack(
+            rx.text("Версія: ", State.app_ver, class_name="text-sm text-gray-300"),
+            rx.spacer(),
+            rx.button("Перевірити оновлення", variant="soft", on_click=State.check_updates(False),
+                      loading=State.update_busy & ~State.update_available),
+            rx.cond(State.update_available,
+                    rx.button("Оновити до ", State.update_latest, on_click=State.install_update,
+                              loading=State.update_busy),
+                    rx.fragment()),
+            class_name="w-full items-center gap-2 flex-wrap",
+        ),
+        rx.cond(State.update_msg != "",
+                rx.text(State.update_msg,
+                        class_name=rx.cond(State.update_ok, "text-xs text-green-400", "text-xs text-red-400"))),
+        rx.cond((State.update_notes != "") & State.update_available,
+                rx.text(State.update_notes, class_name="text-xs text-gray-400 whitespace-pre-wrap max-h-32 overflow-y-auto")),
+        gap="2", class_name="w-full mb-4",
+    )
+
+
+def update_banner() -> rx.Component:
+    """Плашка про нову версію над вкладками режимів (на старті з тихої перевірки). Ставить лише за кліком."""
+    return rx.cond(
+        State.update_available & ~State.update_dismissed,
+        rx.vstack(
+            rx.hstack(
+                rx.icon("download", size=14, class_name="text-sky-400 shrink-0"),
+                rx.text("Доступна ", State.update_latest, class_name="text-xs text-gray-200 flex-1"),
+                rx.icon("x", size=13, class_name="text-gray-500 cursor-pointer shrink-0",
+                        on_click=State.dismiss_update),
+                class_name="w-full items-center gap-1.5",
+            ),
+            rx.button(rx.cond(State.update_busy, "Оновлюю…", "Оновити"), size="1", variant="soft",
+                      on_click=State.install_update, loading=State.update_busy, class_name="w-full"),
+            rx.cond(State.update_msg != "",
+                    rx.text(State.update_msg, class_name=rx.cond(State.update_ok, "text-[11px] text-gray-400",
+                                                                  "text-[11px] text-red-400"))),
+            class_name="w-full gap-1.5 p-2 mb-1 rounded-lg bg-sky-500/10 border border-sky-500/20",
+        ),
+        rx.fragment(),
+    )
+
+
 def settings_dialog() -> rx.Component:
     def font_slider(label, value, on_change, min_v, max_v):
         return rx.hstack(
@@ -2417,6 +2552,7 @@ def settings_dialog() -> rx.Component:
                     class_name="w-full items-center mb-4",
                 ),
                 llm_connection_section(),
+                update_section(),
                 # Тема
                 rx.text("Тема", class_name="text-xs text-gray-500 uppercase tracking-wide mb-1"),
                 rx.segmented_control.root(
@@ -2471,6 +2607,7 @@ def project_section() -> rx.Component:
 def sidebar() -> rx.Component:
     return rx.flex(
         settings_dialog(),
+        update_banner(),
         mode_switch(),
         nav_item("plus", "Новий чат", State.new_chat),
         project_section(),
@@ -3163,4 +3300,4 @@ app = rx.App(
     head_components=[rx.el.style("html,body{margin:0;height:100%;overflow:hidden}")],
 )
 app.add_page(index, title=f"Ігорь! · {logs.app_version()}",
-             on_load=[State.load_sessions, State.load_settings])
+             on_load=[State.load_sessions, State.load_settings, State.check_updates(True)])

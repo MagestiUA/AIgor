@@ -120,6 +120,14 @@ def main() -> None:
     cmd.append(stage / "main.py")
     run(cmd, cwd=ROOT)
     exe = ROOT / "dist" / f"{name}.exe"
+    if exe.exists():
+        # Файл для розсилки й самооновлення — БЕЗ версії в назві (версія — у заголовку вікна), + контрольна сума.
+        import hashlib
+        plain = ROOT / "dist" / "Igor.exe"
+        shutil.copy2(exe, plain)
+        (ROOT / "dist" / "Igor.exe.sha256").write_text(
+            f"{hashlib.sha256(plain.read_bytes()).hexdigest()}  Igor.exe\n", encoding="ascii")
+        print(f"Для розсилки/релізу: {plain} + Igor.exe.sha256 (версія {ver})")
     print(f"\nГОТОВО: {exe}  ({exe.stat().st_size / 1_048_576:.0f} МБ)" if exe.exists() else "\nexe не створено")
 
 
