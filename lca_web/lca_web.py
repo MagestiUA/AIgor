@@ -160,7 +160,20 @@ BORDER = "border-white/10"
 SERIF = {"fontFamily": "Newsreader, Georgia, serif"}
 
 
-_UPDATE_CHECKED = False                    # тиха перевірка оновлень на старті — раз на запуск
+INPUT_ID = "task-input"                     # поле вводу повідомлення (некероване)
+CLEAR_INPUT_JS = (f"(function(){{var e=document.getElementById('{INPUT_ID}');"
+                  "if(e){e.value='';e.style.height='';}})()")
+
+
+def restore_input_js(text: str) -> str:
+    """JS: дочекатись (до ~2 с), поки поле вводу з'явиться після перемикання макета, і вернути в нього текст."""
+    return (f"(function f(t,n){{var e=document.getElementById('{INPUT_ID}');"
+            "if(e&&!e.value){e.value=t;e.focus();return;}"
+            "if(n<20)setTimeout(function(){f(t,n+1)},100);}})("
+            f"{json.dumps(text)},0)")
+
+
+_UPDATE_CHECKED = False                  # тиха перевірка оновлень на старті — раз на запуск
 
 
 class State(rx.State):
@@ -263,6 +276,21 @@ class State(rx.State):
     @rx.event
     def set_task(self, v: str):
         self.task = v
+
+    @rx.event
+    def submit_task(self, form_data: dict):
+        """Відправка з поля вводу. Поле НЕКЕРОВАНЕ (текст живе в браузері, не в стані): керований input
+        слав подію на кожен символ, а Reflex після кожної зміни стану перемальовував усю сторінку разом
+        зі списком повідомлень — у довгому чаті це давало лаги вводу по пів секунди. Тут текст вперше
+        потрапляє в стан — лише при відправці."""
+        text = str((form_data or {}).get("task") or "")
+        if not text.strip():
+            return
+        if self.mode != "chat" and not self.project_root and not self.folder_input.strip():
+            self._append("assistant", "Спершу вкажіть робочу теку.", "note")
+            return rx.call_script(restore_input_js(text))   # підказка перемикає макет → поле створюється заново; повертаємо текст
+        self.task = text
+        return [rx.call_script(CLEAR_INPUT_JS), State.send_task]
 
     def _resolve_confirm(self, ok: bool):
         c = _CONFIRMS.get(self.current_id)
@@ -2958,8 +2986,7 @@ def input_box() -> rx.Component:
                         State.is_chat,
                         "Напишіть повідомлення…  (Enter — надіслати, Shift+Enter — новий рядок)",
                         "Опишіть задачу...  (Enter — надіслати, Shift+Enter — новий рядок)"),
-                    value=State.task,
-                    on_change=State.set_task,
+                    id=INPUT_ID, name="task",       # некероване поле (без value/on_change) — див. State.submit_task
                     enter_key_submit=True,
                     class_name="w-full bg-transparent text-gray-100 placeholder:text-gray-500 "
                                "resize-none outline-none border-none",
@@ -2974,7 +3001,7 @@ def input_box() -> rx.Component:
             ),
             class_name="w-full gap-0",      # ширину задає батьківський контейнер
         ),
-        on_submit=State.send_task,
+        on_submit=State.submit_task,
         reset_on_submit=False,
         class_name="w-full",
     )
