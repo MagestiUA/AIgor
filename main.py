@@ -210,8 +210,23 @@ def _open_window(url: str, log) -> None:
             window.evaluate_js("window.dispatchEvent(new Event('resize'))")
         except Exception:                                   # noqa: BLE001
             pass
-    for _ev in (window.events.maximized, window.events.restored, window.events.resized, window.events.shown):
-        _ev += _relayout
+    from agent import winmetrics
+    log.info("система: %s", winmetrics.system_info())
+    def _settled(why: str) -> None:
+        """Після затишшя подій: знімок «як є» (видно проблему), штовхач resize, знімок «після»."""
+        winmetrics.log_snapshot(window, log, why)
+        if winmetrics.layout_problem(winmetrics.page_info(window)):
+            _relayout()
+            time.sleep(0.4)
+            winmetrics.log_snapshot(window, log, why + " після resize-штовхача")
+    snap = winmetrics.Debounced(_settled)
+
+    def _on(name: str):
+        def h(*a) -> None:
+            snap(name + (f" {a}" if a else ""))
+        return h
+    for _name in ("shown", "loaded", "maximized", "restored", "resized"):
+        getattr(window.events, _name).__iadd__(_on(_name))
     from agent import serve
     icon = serve.bundle_root() / "assets" / "igor.ico"       # іконка вікна (у .exe беремо з вбудованих assets)
     webview.start(icon=str(icon) if icon.is_file() else None)
