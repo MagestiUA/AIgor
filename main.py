@@ -51,26 +51,54 @@ WINDOW_FILE = Path.home() / ".local-code-agent" / "window.json"
 DEFAULT_GEOMETRY = {"width": 1280, "height": 860, "x": None, "y": None}
 
 
+def _virtual_screen() -> tuple[int, int, int, int] | None:
+    """Прямокутник усіх моніторів (x, y, w, h) за Windows; None, якщо дізнатись не вдалось."""
+    try:
+        import ctypes
+        u = ctypes.windll.user32
+        r = (u.GetSystemMetrics(76), u.GetSystemMetrics(77), u.GetSystemMetrics(78), u.GetSystemMetrics(79))
+        return r if r[2] > 0 and r[3] > 0 else None
+    except Exception:
+        return None
+
+
+def sane_geometry(geo: dict, screen: tuple[int, int, int, int] | None) -> dict:
+    """Геометрія, з якою вікно гарантовано з'явиться на екрані. Мінімізоване вікно Windows віддає координати
+    ≈ -25600 і мізерний розмір — їх не можна запам'ятовувати (вікно «запущене», але ніде не видно).
+    Розмір — не менший за min_size; координати лишаємо лише якщо верхній лівий кут вікна (з запасом 60 px
+    під заголовок) всередині монітора, інакше x/y скидаємо — система розмістить вікно сама."""
+    g = dict(geo)
+    g["width"] = max(MIN_WINDOW[0], int(g.get("width") or DEFAULT_GEOMETRY["width"]))
+    g["height"] = max(MIN_WINDOW[1], int(g.get("height") or DEFAULT_GEOMETRY["height"]))
+    x, y = g.get("x"), g.get("y")
+    if x is None or y is None:
+        g["x"] = g["y"] = None
+    elif screen:
+        sx, sy, sw, sh = screen
+        if not (sx - 20 <= x <= sx + sw - 60 and sy - 20 <= y <= sy + sh - 60):
+            g["x"] = g["y"] = None
+    elif x < -10000 or y < -10000:
+        g["x"] = g["y"] = None
+    return g
+
+
 def _load_geometry() -> dict:
     try:
         d = json.loads(WINDOW_FILE.read_text(encoding="utf-8"))
-        geo = {**DEFAULT_GEOMETRY, **d}
-        # Захист від сміттєвої збереженої геометрії (напр. зі звуженого/
-        # мінімізованого стану) — не менше за min_size вікна.
-        geo["width"] = max(MIN_WINDOW[0], int(geo.get("width") or DEFAULT_GEOMETRY["width"]))
-        geo["height"] = max(MIN_WINDOW[1], int(geo.get("height") or DEFAULT_GEOMETRY["height"]))
-        return geo
+        return sane_geometry({**DEFAULT_GEOMETRY, **d}, _virtual_screen())
     except Exception:
         return dict(DEFAULT_GEOMETRY)
 
 
 def _save_geometry(window) -> None:
     try:
+        g = {"width": window.width, "height": window.height, "x": window.x, "y": window.y}
+        # мінімізоване/згорнуте вікно: координати ≈ -25600 і крихітний розмір — не зберігаємо, лишаємо попереднє
+        if g["x"] is None or g["y"] is None or g["x"] <= -10000 or g["y"] <= -10000 \
+                or g["width"] < MIN_WINDOW[0] or g["height"] < MIN_WINDOW[1]:
+            return
         WINDOW_FILE.parent.mkdir(parents=True, exist_ok=True)
-        WINDOW_FILE.write_text(json.dumps({
-            "width": window.width, "height": window.height,
-            "x": window.x, "y": window.y,
-        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        WINDOW_FILE.write_text(json.dumps(g, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
 
