@@ -1,7 +1,10 @@
 from pathlib import Path
 import json
 
-SETTINGS_FILE = Path.home() / ".local-code-agent" / "settings.json"
+import os
+
+# LCA_SETTINGS_FILE — окремий профіль налаштувань (тести, локальна модель) без зачіпання основного файлу
+SETTINGS_FILE = Path(os.environ.get("LCA_SETTINGS_FILE") or Path.home() / ".local-code-agent" / "settings.json")
 DEFAULT = {
     "theme": "auto",
     "font_chat": 14,
@@ -13,6 +16,7 @@ DEFAULT = {
     "llm_port": "",
     "llm_api_key": "",         # лежить у файлі користувача відкритим текстом
     "llm_model": "",           # "" = перша модель із /v1/models
+    "llm_context": "",         # розмір вікна моделі в токенах (локальна модель на «серверному» профілі); "" = 262144
     # Навантаження GPU сервера (agent/gpumon.py): за замовчуванням увімкнено; недоступні дані — без графіка
     "gpu_monitor": True,
     "gpu_monitor_port": "8001",

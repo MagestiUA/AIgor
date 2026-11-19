@@ -13,12 +13,13 @@ from __future__ import annotations
 
 import re
 
-from . import config, logs
+from . import config, limits, logs
 from .loopguard import LoopGuard
 from .toolkit import Tool, ToolContext, ToolRegistry, default_registry
 
 READ_ONLY = ("list_dir", "read_file", "read_attachment", "web_search")
-MAX_ITERS = 25
+MAX_ITERS = 12            # бюджет читань субагента (далі — примусовий висновок)
+WARN_AT = 8
 REPORT_MAX = 1800
 
 SYSTEM = (
@@ -57,11 +58,14 @@ def investigate(task: str, ctx: ToolContext, client=None, max_iters: int = MAX_I
     client = client or ctx.client
     if client is None:
         return "субагент недоступний: немає клієнта моделі"
+    from .agent_loop import COMPACT_RATIO, compact_tool_results, finalize
+    from .loopguard import context_full
     reg = readonly_registry()
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task}]
     guard, n_calls, final = LoopGuard(), 0, ""
     log = logs.get("tools")
-    for _ in range(max_iters):
+    win = limits.get().context_tokens
+    for it in range(max_iters):
         msg = client.chat(messages, tools=reg.schema(), profile=config.EXECUTOR)
         calls, recovered = recover_tool_calls(msg)
         if not calls:
@@ -78,13 +82,18 @@ def investigate(task: str, ctx: ToolContext, client=None, max_iters: int = MAX_I
         verdict = guard.check()
         if verdict:
             if verdict[0] == "stop":
-                final = f"(субагент зациклився: {verdict[1]})"
-                break
+                break                                           # зациклився — нижче просимо висновок зі зібраного
             messages.append({"role": "user", "content": "Не повторюй ті самі дії. Дай висновок із того, що вже знайдено."})
+        elif it + 1 == WARN_AT:
+            messages.append({"role": "user", "content": "Ти вже прочитав достатньо. Якщо можеш відповісти — дай висновок зараз, без нових викликів."})
+        ls = getattr(client, "last_stats", None) or {}
+        if ls and win and ls.get("prompt", 0) >= COMPACT_RATIO * win:
+            compact_tool_results(messages, keep_last=4, head=400)     # старі виводи не мають переповнити вікно субагента
+            if context_full(ls.get("prompt", 0), win):
+                break
     if not final:
-        # бюджет вичерпано — просимо підсумок без тулів
-        messages.append({"role": "user", "content": "Ліміт дій вичерпано. Дай короткий висновок із того, що знайдено."})
-        final = (client.chat(messages, profile=config.EXECUTOR).get("content") or "").strip() or "(висновку нема)"
+        # бюджет/контекст вичерпано — висновок із зібраного, без тулів (а не «невдача»)
+        final = finalize(messages, client) or "(висновку нема: субагент не встиг нічого з'ясувати)"
     log.info("субагент: %d дій, висновок %d симв.", n_calls, len(final))
     return f"{_clip_report(final)}\n\n[субагент: {n_calls} дій читання; сирі виводи в контекст не потрапили]"
 

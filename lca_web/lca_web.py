@@ -1611,12 +1611,20 @@ class State(rx.State):
         на async-паузу — діалог показується з контексту ЦІЄЇ події (дельта доходить), а
         не з відірваної корутини. Додає ОДНЕ повідомлення-крок із катом «хід виконання».
         Логіку дублюємо з agent_loop.run_step (той лишається для headless/тестів)."""
-        from agent.agent_loop import SYSTEM as EXEC_SYSTEM, _args, COMPACT_RATIO, CHECKPOINT_EVERY, compact_tool_results
+        from agent.agent_loop import (SYSTEM as EXEC_SYSTEM, _args, COMPACT_RATIO, CHECKPOINT_EVERY, compact_tool_results,
+                                      ReadStreak, READ_NUDGE, finalize, is_research_step, research_report)
         reg = default_registry()
         client = ctx.client
         user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
         async with self:
             imgs = self._recent_image_urls()             # скриншот/макет користувача — виконавцю теж
+        if is_research_step(step_text) and "investigate" in reg.names():      # дослідницький крок → субагент кодом
+            async with self:
+                aid_sub = self._act_start("llm", "Субагент-дослідник", "читає файли в окремому контексті")
+            t_sub = time.monotonic()
+            user += await asyncio.to_thread(research_report, step_text, context, ctx, reg)
+            async with self:
+                self._act_done(aid_sub, f"{time.monotonic() - t_sub:.1f}с · висновок отримано")
         umsg = {"role": "user", "content": user}
         if imgs:
             umsg["images"] = imgs
@@ -1632,6 +1640,7 @@ class State(rx.State):
         final = ITER_LIMIT_MSG
         nudged = False
         since_cp = 0                          # дій від останньої проміжної перевірки планувальником
+        reads = ReadStreak()                  # «читання без дій»: підштовхуємо до висновку
         async with self:
             cid_live = self.current_id
         for _ in range(max_iters):
@@ -1687,6 +1696,7 @@ class State(rx.State):
                     touched.extend(orch.touched_paths(name, args))
                 messages.append({"role": "tool", "content": result})
                 guard.observe(name, args, result)
+                reads.observe(name)
             verdict = guard.check()
             if verdict:
                 kind, reason = verdict
@@ -1698,6 +1708,14 @@ class State(rx.State):
                 messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason, last=guard.last_result[:300])})
                 async with self:
                     self._append("assistant", f"⚠ Помітив повтор без прогресу ({reason}) — прошу змінити підхід.", "note")
+            rv = reads.verdict()
+            if rv == "force":
+                out = await asyncio.to_thread(finalize, messages, client)
+                if out:
+                    final = out
+                    break
+            elif rv == "warn":
+                messages.append({"role": "user", "content": READ_NUDGE})
             since_cp += len(calls)
             if checkpoint is not None and since_cp >= CHECKPOINT_EVERY:      # проміжний звіт планувальнику
                 since_cp = 0
@@ -1715,9 +1733,20 @@ class State(rx.State):
                 if freed and context_full(ls.get("prompt", 0), win):
                     continue                              # стиснули старі результати — крок може завершитись
             if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):
+                if actions and not reads.acted:        # лише читали — висновок із зібраного (після стиснення)
+                    compact_tool_results(messages, keep_last=2, head=300)
+                    out = await asyncio.to_thread(finalize, messages, client)
+                    if out:
+                        final = out
+                        break
                 final = (f"{CONTEXT_FULL_PREFIX} ({ls.get('prompt')} токенів). "
                          "Розбийте задачу на менші кроки.")
                 break
+        else:
+            if actions and not reads.acted:            # бюджет вичерпано, але були лише читання — просимо висновок
+                out = await asyncio.to_thread(finalize, messages, client)
+                if out:
+                    final = out
         log = [f"{n} -> {r[:80]}" for n, r in actions]
 
         parts: list[str] = []

@@ -51,8 +51,27 @@ REMOTE = Limits(chunk=120_000, inline=200_000, summary=100_000, digest=200_000,
 FORCE: Limits | None = None
 
 
+def scaled(base: Limits, window: int) -> Limits:
+    """Ті ж правила, що й base, але бюджети (символи/токени) пропорційно зменшені під менше вікно моделі —
+    для локальної моделі на «серверному» профілі (напр. 32k замість 262k). Лічильники (історія, ітерації) лишаються."""
+    from dataclasses import replace
+    k = max(0.02, min(1.0, window / base.context_tokens))
+    sc = lambda v, lo=1000: max(lo, int(v * k))
+    return replace(base, chunk=sc(base.chunk), inline=sc(base.inline), summary=sc(base.summary), digest=sc(base.digest),
+                   topic=sc(base.topic), file_chars=sc(base.file_chars, 4000), read_chars=sc(base.read_chars, 4000),
+                   map_chars=sc(base.map_chars, 1500), context_tokens=int(window))
+
+
 def get(settings: dict | None = None) -> Limits:
     if FORCE is not None:
         return FORCE
     from . import backend
-    return REMOTE if backend.resolve(settings)["backend"] == "openai" else LOCAL
+    from . import settings as S
+    s = settings if settings is not None else S.load()
+    if backend.resolve(s)["backend"] != "openai":
+        return LOCAL
+    try:
+        win = int(str(s.get("llm_context") or "0").strip() or 0)      # свій розмір вікна (локальна модель)
+    except ValueError:
+        win = 0
+    return scaled(REMOTE, win) if 2048 <= win < REMOTE.context_tokens else REMOTE

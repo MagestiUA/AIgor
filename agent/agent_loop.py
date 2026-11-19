@@ -38,6 +38,85 @@ def compact_tool_results(messages: list[dict], keep_last: int = COMPACT_KEEP, he
     return n
 
 
+READ_ONLY_TOOLS = ("list_dir", "read_file", "read_attachment", "web_search", "project_note", "investigate")
+READ_WARN = 8              # стільки читань ПІДРЯД (без жодної зміни/команди) → просимо дати висновок
+READ_FORCE = 12            # ... а стільки → примусовий висновок без тулів
+FINALIZE_TEXT = (
+    "Досить збирати інформацію. Дай ВИСНОВОК за тим, що вже знайдено: відповідь на завдання кроку, точні шляхи "
+    "файлів і назви функцій. НЕ викликай інструменти. Якщо чогось не вистачило — так і скажи, що саме."
+)
+READ_NUDGE = ("Ти вже прочитав багато файлів поспіль. Якщо інформації достатньо — дай висновок зараз, без нових "
+              "викликів. Читай далі лише те, чого справді бракує для відповіді.")
+
+
+class ReadStreak:
+    """Слідкує за «читанням без дій»: слабка модель читає файл за файлом і не переходить до висновку.
+    Кроки, що вже щось змінювали чи запускали (будь-який не-читальний тул), не чіпаємо — ними опікується планувальник."""
+
+    def __init__(self) -> None:
+        self.streak = 0
+        self.acted = False
+        self.warned = False
+
+    def observe(self, name: str) -> None:
+        if name in READ_ONLY_TOOLS:
+            self.streak += 1
+        else:
+            self.streak = 0
+            self.acted = True
+
+    def verdict(self) -> str:
+        """"" | "warn" | "force"."""
+        if self.acted:
+            return ""
+        if self.streak >= READ_FORCE:
+            return "force"
+        if self.streak >= READ_WARN and not self.warned:
+            self.warned = True
+            return "warn"
+        return ""
+
+
+def finalize(messages: list[dict], client) -> str:
+    """Останній виклик БЕЗ тулів: примусовий висновок із зібраного. Порожньо, якщо модель нічого не дала."""
+    msgs = list(messages) + [{"role": "user", "content": FINALIZE_TEXT}]
+    try:
+        out = (client.chat(msgs, profile=config.EXECUTOR).get("content") or "").strip()
+    except Exception as e:
+        logs.get("agent").warning("примусовий висновок не вдався: %s", e)
+        return ""
+    return out
+
+
+_RESEARCH = re.compile(r"\b(знайди|з'ясуй|дізнайся|досліди|дослідж\w*|проаналізуй|огляни|переглянь|поясни|"
+                       r"як працює|де в проєкті|де знаходиться|find|investigate|explore|analy[sz]e|explain)\b", re.I)
+_CHANGE = re.compile(r"\b(виправ\w*|зміни|змінити|додай|додати|створи|створити|напиши|написати|видали|видалити|замін\w+|"
+                     r"реалізуй|онови|оновити|перейменуй|запусти|встанови|fix|edit|create|write|implement|add|remove|"
+                     r"run|install|delete|rename)\b", re.I)
+
+
+def is_research_step(step_text: str) -> bool:
+    """Крок суто «дізнатись/знайти» (без змін і команд): його варто віддати субагентові кодом, а не покладатись на
+    те, що слабка модель сама делегує (живий тест: вона викликає investigate, а потім усе одно перечитує файли)."""
+    t = step_text or ""
+    return bool(_RESEARCH.search(t)) and not _CHANGE.search(t)
+
+
+def research_report(step_text: str, context: str, ctx, registry) -> str:
+    """Запустити субагента на дослідницькому кроці й повернути блок для промпту виконавця ('' якщо не застосовно)."""
+    if "investigate" not in registry.names() or not is_research_step(step_text):
+        return ""
+    from .subagent import investigate
+    task = step_text + (f"\n\nКонтекст: {context[:1500]}" if context else "")
+    try:
+        rep = investigate(task, ctx)
+    except Exception as e:
+        logs.get("agent").warning("авто-делегування субагенту не вдалось: %s", e)
+        return ""
+    return ("\n\nЗВІТ СУБАГЕНТА-ДОСЛІДНИКА (він уже прочитав потрібні файли; довіряй йому й НЕ перечитуй ті самі "
+            "файли — відповідай на крок за цим звітом, читай лише точкові рядки, якщо чогось справді бракує):\n" + rep)
+
+
 def is_incomplete(final: str | None) -> bool:
     """Крок НЕ завершено (ліміт / зациклення / переповнений контекст) — не вважати «done»."""
     f = final or ""
@@ -331,10 +410,12 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
         max_iters = limits.get().hard_iters or _estimate_iters(step_text, context, client)
     guard = LoopGuard()
     user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
+    user += research_report(step_text, context, ctx, registry)      # дослідницький крок → субагент кодом
     messages = [{"role": "system", "content": SYSTEM},
                 {"role": "user", "content": user}]
     log: list[str] = []
     nudged = False
+    reads = ReadStreak()
 
     for _ in range(max_iters):
         if stop_event is not None and stop_event.is_set():
@@ -376,6 +457,7 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
                 on_tool(name, args, result)
             messages.append({"role": "tool", "content": result})
             guard.observe(name, args, result)
+            reads.observe(name)
         verdict = guard.check()
         if verdict:
             kind, reason = verdict
@@ -384,6 +466,13 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
             if kind == "stop":
                 return guard.stuck_message(reason), log
             messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason, last=guard.last_result[:300])})
+        rv = reads.verdict()
+        if rv == "force":
+            out = finalize(messages, client)
+            if out:
+                return out, log
+        elif rv == "warn":
+            messages.append({"role": "user", "content": READ_NUDGE})
         ls = getattr(client, "last_stats", None) or {}
         win = limits.get().context_tokens
         if ls and win and ls.get("prompt", 0) >= COMPACT_RATIO * win:
@@ -392,8 +481,17 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
                 continue                                  # стиснули — даємо кроку шанс завершитись
         if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):
             logs.get("agent").warning("контекст майже заповнений: %s токенів", ls.get("prompt"))
+            if log and not reads.acted:                # лише читали — віддаємо висновок із зібраного (після стиснення)
+                compact_tool_results(messages, keep_last=2, head=300)
+                out = finalize(messages, client)
+                if out:
+                    return out, log
             return (f"{CONTEXT_FULL_PREFIX} ({ls.get('prompt')} токенів). "
                     "Розбийте задачу на менші кроки."), log
 
     logs.get("agent").warning("крок досяг ліміту ітерацій (%d): %s", max_iters, step_text[:80])
+    if log and not reads.acted:                    # лише читали: замість «невдачі» просимо висновок зі зібраного
+        out = finalize(messages, client)
+        if out:
+            return out, log
     return ITER_LIMIT_MSG, log

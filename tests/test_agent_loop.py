@@ -209,9 +209,12 @@ def main() -> None:
         # 3) довга справна робота (60 різних дій — більше за колишній ліміт) НЕ зупиняється
         def long_work(s, m):
             return read_missing(f"f{s.n}.py") if s.n < 60 else {"content": "Готово, 60 кроків.", "tool_calls": []}
+        import agent.agent_loop as _AL
+        _rf, _AL.READ_FORCE = _AL.READ_FORCE, 10**6      # тут перевіряємо LoopGuard; ліміт «читань підряд» має свій тест
         lw = Recorder(long_work)
         f3, lg3 = run_step("довго", ctx, client=lw, max_iters=None)
         assert f3 == "Готово, 60 кроків." and len(lg3) == 59, (f3, len(lg3))
+        _AL.READ_FORCE = _rf
     finally:
         limits.FORCE = limits.LOCAL
     assert is_incomplete("досягнуто ліміту ітерацій") and not is_incomplete("Готово")
