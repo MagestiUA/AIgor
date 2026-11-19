@@ -83,3 +83,20 @@ def test_connection(base_url: str, api_key: str = "", timeout: float = 15.0) -> 
     except Exception:
         return False, "Відповідь сервера — не OpenAI-сумісний /models.", []
     return True, f"З'єднання OK. Моделі: {', '.join(models) or '—'}", models
+
+
+def test_ollama(model: str = "", host: str = "", timeout: float = 5.0) -> tuple[bool, str]:
+    """Перевірка локальної Ollama: сервер відповідає на /api/tags і потрібна модель завантажена."""
+    host = (host or config.HOST).rstrip("/")
+    model = (model or config.LOCAL_MODEL).strip()
+    try:
+        r = requests.get(host + "/api/tags", timeout=timeout)
+        r.raise_for_status()
+        names = [m.get("name", "") for m in r.json().get("models", [])]
+    except requests.exceptions.RequestException:
+        return False, "Ollama не відповідає (запустіть застосунок Ollama або `ollama serve`)."
+    except ValueError:
+        return False, "Відповідь Ollama не схожа на /api/tags."
+    if model in names or f"{model}:latest" in names:
+        return True, f"З'єднання OK. Модель {model} є локально."
+    return False, f"Ollama працює, але моделі {model} нема. Завантажте: ollama pull {model}"

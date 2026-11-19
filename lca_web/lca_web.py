@@ -326,6 +326,7 @@ class State(rx.State):
     llm_port: str = ""
     llm_model: str = ""
     llm_context: str = ""
+    llm_rev: int = 0               # збільшується при збереженні підключення → перерахунок панелі контексту
     llm_key_input: str = ""
     llm_key_saved: bool = False
     llm_test_msg: str = ""
@@ -518,6 +519,7 @@ class State(rx.State):
         """Розбивка контексту поточного чату (JSON-рядок; решта ctx_* розбирають його).
         Токени — оцінка за символами (agent/context_view.py). Залежності відстежуються
         прямими зверненнями до self.* (messages, summary, compress_log, вкладення…)."""
+        _ = self.llm_rev                                      # перерахунок після збереження налаштувань (вікно/бекенд)
         lim = limits.get()
         chat = self.mode == "chat"
         msgs = [dict(m) for m in self.messages]
@@ -564,6 +566,7 @@ class State(rx.State):
 
     @rx.var
     def ctx_pct(self) -> int:
+        _ = self.llm_rev
         rep = json.loads(self.ctx_report)
         live = round(100 * self.ctx_live / limits.get().context_tokens) if self.ctx_live else 0
         return max(int(rep["used_pct"]), live)
@@ -1082,6 +1085,7 @@ class State(rx.State):
                   new["llm_backend"], new["llm_host"], new["llm_port"], new["llm_model"],
                   bool(self.llm_key_input.strip()))
         reset_client()
+        self.llm_rev += 1
         self.llm_key_input = ""
         self.llm_key_saved = bool(new.get("llm_api_key"))
         self.llm_test_msg, self.llm_test_ok = "Збережено.", True
@@ -1205,6 +1209,12 @@ class State(rx.State):
                 return
             self.llm_testing, self.llm_test_msg = True, "Перевіряю…"
             host, port, typed = self.llm_host, self.llm_port, self.llm_key_input.strip()
+            local_model = self.llm_model.strip() if self.llm_backend == "ollama" else None
+        if local_model is not None:                                # локальний режим: Ollama, а не OpenAI-сервер
+            ok, msg = await asyncio.to_thread(lambda: backend.test_ollama(local_model))
+            async with self:
+                self.llm_testing, self.llm_test_ok, self.llm_test_msg = False, ok, msg
+            return
         key = typed or S.load().get("llm_api_key", "")
         ok, msg, models = await asyncio.to_thread(
             lambda: backend.test_connection(backend.build_base_url(host, port), key))

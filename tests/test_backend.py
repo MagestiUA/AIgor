@@ -54,7 +54,25 @@ def main() -> None:
         assert not ok and "адресу" in msg
     finally:
         srv.shutdown()
-    print("OK: backend — build_base_url, пріоритети, make_client, test_connection (ok/401/недоступний)")
+    # локальна Ollama: сервер є + модель є / моделі нема / сервер мовчить
+    from unittest import mock
+    import requests as _rq
+
+    class R:
+        def __init__(self, names): self._n = names
+        def raise_for_status(self): pass
+        def json(self): return {"models": [{"name": n} for n in self._n]}
+    with mock.patch("agent.backend.requests.get", return_value=R([config.LOCAL_MODEL, "other:latest"])):
+        ok, msg = backend.test_ollama()
+        assert ok and config.LOCAL_MODEL in msg
+        ok, msg = backend.test_ollama("other")
+        assert ok                                              # :latest додається
+        ok, msg = backend.test_ollama("нема-такої")
+        assert not ok and "ollama pull нема-такої" in msg
+    with mock.patch("agent.backend.requests.get", side_effect=_rq.exceptions.ConnectionError()):
+        ok, msg = backend.test_ollama()
+        assert not ok and "не відповідає" in msg
+    print("OK: backend — build_base_url, пріоритети, make_client, test_connection (ok/401/недоступний), test_ollama")
 
 
 if __name__ == "__main__":
