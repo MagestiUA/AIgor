@@ -475,111 +475,26 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
              registry: ToolRegistry | None = None, context: str = "",
              max_iters: int | None = None, on_tool=None, stats_sink: list | None = None,
              stop_event=None) -> tuple[str, list[str]]:
-    """Виконати один крок через tool-loop.
-    max_iters=None → авто-оцінка моделлю (n*2); явне число скасовує оцінку.
-    on_tool(name, args, result) — необовʼязковий колбек для UI-журналу.
-    stats_sink — якщо передано, у нього додаються client.last_stats кожного виклику
-    моделі (для лічильника токенів кроку).
-    stop_event: threading.Event — якщо встановлено, цикл переривається між
-    ітераціями (поточний частковий результат повертається).
+    """Виконати один крок через tool-loop (синхронна обгортка над agent.steploop — для скриптів і тестів;
+    продакшн-UI викликає те саме ядро з власними хуками).
+    max_iters=None → hard_iters із налаштувань або оцінка моделлю; явне число скасовує це.
+    on_tool(name, args, result) — необовʼязковий колбек для журналу.
+    stats_sink — у нього додаються client.last_stats кожного виклику моделі (лічильник токенів кроку).
+    stop_event: threading.Event — якщо встановлено, цикл переривається між ітераціями.
     Повертає (фінальний_текст, журнал_дій)."""
+    from .steploop import LoopConfig, LoopHooks, run_loop, run_sync
     client = client or OllamaClient()
     registry = registry or default_registry()
     if max_iters is None:
         # Слабка локальна модель: ліміт за оцінкою. Сильна (сервер): довгу роботу НЕ обмежуємо —
         # стежимо за прогресом (LoopGuard), а hard_iters — лише запобіжник.
         max_iters = limits.get().hard_iters or _estimate_iters(step_text, context, client)
-    guard = LoopGuard()
     user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
     user += research_report(step_text, context, ctx, registry)      # дослідницький крок → субагент кодом
     messages = [{"role": "system", "content": SYSTEM},
                 {"role": "user", "content": user}]
-    log: list[str] = []
-    nudged = False
-    reads = ReadStreak()
-
-    for _ in range(max_iters):
-        if stop_event is not None and stop_event.is_set():
-            return "зупинено користувачем", log
-        msg = client.chat(messages, tools=registry.schema(), profile=config.EXECUTOR)
-        if stats_sink is not None and client.last_stats:
-            stats_sink.append(dict(client.last_stats))
-        calls, recovered = recover_tool_calls(msg)
-        if not calls:
-            content = (msg.get("content") or "").strip()
-            # Великий файл дочитується частинами (read_attachment offset) — якщо
-            # лишився непрочитаний хвіст, а модель не продовжила виклик, ДОЧИТУЄМО
-            # САМІ (текстовий nudge тут ненадійний — бачили живцем 15+ ідентичних
-            # повторів "продовжую читати" без жодної дії). Див. pending_continuation.
-            cont = pending_continuation(messages)
-            if cont is not None:
-                calls, recovered = [cont], True
-            # НЕ повертаємо зламаний/порожній текст назад як assistant-повідомлення —
-            # інакше модель копіює власну попередню відповідь і застрягає в тому
-            # самому виводі навіть при повторі (перевірено живцем). Див. should_nudge.
-            elif should_nudge(content, nudged):
-                nudged = True
-                logs.get("agent").info("nudge: порожня/просочена відповідь без tool_calls")
-                messages.append({"role": "user", "content": NUDGE_TEXT})
-                continue
-            else:
-                return content, log
-
-        # recovered=True: викликали тул з розпарсеного просоченого тексту — НЕ ехо-имо
-        # сам зламаний текст назад (той самий анти-анкоринг, що й для nudge).
-        messages.append({"role": "assistant", "content": "" if recovered else msg.get("content", ""),
-                         "tool_calls": calls})
-        for call in calls:
-            name = call.get("function", {}).get("name", "")
-            args = _args(call)
-            result = registry.dispatch(name, args, ctx)
-            log.append(f"{name}({', '.join(args)}) -> {result[:80]}")
-            if on_tool:
-                on_tool(name, args, result)
-            messages.append({"role": "tool", "content": result})
-            guard.observe(name, args, result)
-            reads.observe(name)
-        verdict = guard.check()
-        if verdict:
-            kind, reason = verdict
-            logs.get("agent").warning("зациклення (%s): %s | останній результат: %s", kind, reason,
-                                      guard.last_result[:120].replace(chr(10), " "))
-            if kind == "stop":
-                return guard.stuck_message(reason), log
-            messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason, last=guard.last_result[:300])})
-        rv = reads.verdict()
-        if rv == "force":
-            out = finalize(messages, client)
-            if out:
-                return out, log
-        elif rv == "warn":
-            messages.append({"role": "user", "content": READ_NUDGE})
-        ls = getattr(client, "last_stats", None) or {}
-        win = limits.get().context_tokens
-        if ls and win and ls.get("prompt", 0) >= COMPACT_RATIO * win:
-            freed = compact_tool_results(messages)               # дешево: обрізаємо старі результати тулів
-            if ls.get("prompt", 0) >= SUMMARIZE_RATIO * win:     # не вистачило — підсумок від моделі замість середини історії
-                done, b4, af = summarize_history(messages, client, win)
-                if done:
-                    logs.get("agent").info("історію кроку стиснуто підсумком: %d → %d символів", b4, af)
-                    if on_tool:
-                        on_tool("compress", {}, f"історію кроку стиснуто підсумком: {b4} → {af} символів")
-                    continue
-            if freed and context_full(ls.get("prompt", 0), win):
-                continue                                  # стиснули — даємо кроку шанс завершитись
-        if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):
-            logs.get("agent").warning("контекст майже заповнений: %s токенів", ls.get("prompt"))
-            if log and not reads.acted:                # лише читали — віддаємо висновок із зібраного (після стиснення)
-                compact_tool_results(messages, keep_last=2, head=300)
-                out = finalize(messages, client)
-                if out:
-                    return out, log
-            return (f"{CONTEXT_FULL_PREFIX} ({ls.get('prompt')} токенів). "
-                    "Розбийте задачу на менші кроки."), log
-
-    logs.get("agent").warning("крок досяг ліміту ітерацій (%d): %s", max_iters, step_text[:80])
-    if log and not reads.acted:                    # лише читали: замість «невдачі» просимо висновок зі зібраного
-        out = finalize(messages, client)
-        if out:
-            return out, log
-    return ITER_LIMIT_MSG, log
+    res = run_sync(run_loop(messages, registry=registry, ctx=ctx, client=client,
+                            hooks=LoopHooks(stop_event=stop_event, on_tool=on_tool), cfg=LoopConfig(max_iters=max_iters)))
+    if stats_sink is not None:
+        stats_sink.extend(res.stats)
+    return res.final, [f"{n}({', '.join(a)}) -> {r[:80]}" for n, a, r in res.actions]
