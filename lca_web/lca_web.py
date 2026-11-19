@@ -29,16 +29,17 @@ from agent import activity as act
 from agent import context_view as cv
 from agent import orchestration as orch
 from agent import projectmap
-from agent.loopguard import (CHECKPOINT_PREFIX, CONTEXT_FULL_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from agent import limits
 from agent import logs
 from agent import chat_projects as CP
 from agent import session as sess
 from agent import topics
-from agent.agent_loop import (ITER_LIMIT_MSG, is_incomplete, _estimate_iters, NUDGE_TEXT, pending_continuation,
+from agent.agent_loop import (is_incomplete, _estimate_iters, NUDGE_TEXT, pending_continuation,
                               recover_tool_calls, should_nudge,
                               _looks_like_leaked_reasoning,
                               extract_intended_attachments)
+from agent.agent_loop import summarize_history
+from agent.steploop import LoopHooks
 from agent.answerer import build_context
 from agent.stepreview import check_consistency
 from agent import stepreview as review
@@ -265,6 +266,57 @@ GPU_POLL_S = 10                             # як часто опитувати
 _GPU_GEN = 0                                # поколінна відмітка циклу опитування GPU (новий запуск витісняє старий)
 _POLL_GEN = 0                              # поколінна відмітка циклу перевірки: новий on_load витісняє старий
 _UPDATE_CHECKED = False                 # тиха перевірка оновлень на старті — раз на запуск
+
+
+class _UIHooks(LoopHooks):
+    """Хуки ядра циклу (agent.steploop) для UI: диспетчер тулів із async-підтвердженням shell, картки активності,
+    коментарі користувача по ходу, проміжні перевірки планувальника, запис про стиснення в чат і панель."""
+
+    def __init__(self, state, cid: str, stop_event=None, checkpoint=None):
+        super().__init__(stop_event=stop_event)
+        self.st, self.cid, self._checkpoint = state, cid, checkpoint
+
+    async def dispatch(self, registry, name, args, ctx):
+        return await self.st._dispatch_tool(registry, name, args, ctx)
+
+    def live_messages(self) -> list[str]:
+        """Коментар користувача по ходу: показуємо виконавцю одразу, а планувальник отримає його (не прибираємо) після кроку."""
+        out = []
+        for n in _LIVE_NOTES.get(self.cid, []):
+            if not n["seen"]:
+                n["seen"] = True
+                out.append(n["text"])
+        return out
+
+    async def before_llm(self, messages):
+        async with self.st:
+            aid = self.st._act_start("llm", "Запит до моделі", f"повідомлень у контексті: {len(messages)}")
+        return aid, time.monotonic()
+
+    async def after_llm(self, token, stats, n_calls):
+        aid, t0 = token
+        async with self.st:
+            self.st.ctx_live = int(stats.get("prompt", 0) or 0)
+            self.st._act_done(aid, f"{time.monotonic() - t0:.1f}с · ↑{stats.get('prompt', 0)} ↓{stats.get('out', 0)} токенів"
+                                   + (f" · викликів тулів: {n_calls}" if n_calls else " · текстова відповідь"))
+
+    async def guard_warning(self, reason):
+        async with self.st:
+            self.st._append("assistant", f"⚠ Помітив повтор без прогресу ({reason}) — прошу змінити підхід.", "note")
+
+    async def summarize(self, messages, client, window):
+        async with self.st:
+            aid = self.st._act_start("llm", "Стиснення контексту", "підсумок історії кроку від моделі")
+        t0 = time.monotonic()
+        done, b4, af = await asyncio.to_thread(summarize_history, messages, client, window)
+        async with self.st:
+            self.st._act_done(aid, f"{time.monotonic() - t0:.1f}с · " + (f"{b4} → {af} символів" if done else "пропущено"), ok=done)
+            if done:
+                self.st._apply_compress_events(self.cid, [("історія кроку", b4, af, "")])
+        return done, b4, af
+
+    async def checkpoint(self, actions):
+        return await self._checkpoint(actions) if self._checkpoint else None
 
 
 class State(rx.State):
@@ -1633,19 +1685,18 @@ class State(rx.State):
 
     async def _run_tool_step(self, step_text: str, ctx: ToolContext, title: str = "",
                              context: str = "", stop_event=None, checkpoint=None):
-        """Async per-step tool-loop: модель кличе тули, ми диспетчеримо їх (виклик моделі
-        — per-iteration через to_thread). run_shell, що потребує підтвердження, ставимо
-        на async-паузу — діалог показується з контексту ЦІЄЇ події (дельта доходить), а
-        не з відірваної корутини. Додає ОДНЕ повідомлення-крок із катом «хід виконання».
-        Логіку дублюємо з agent_loop.run_step (той лишається для headless/тестів)."""
-        from agent.agent_loop import (SYSTEM as EXEC_SYSTEM, _args, COMPACT_RATIO, CHECKPOINT_EVERY, compact_tool_results,
-                                      ReadStreak, READ_NUDGE, finalize, is_research_step, research_report,
-                                      SUMMARIZE_RATIO, summarize_history)
+        """Async per-step tool-loop для UI. Саме ядро циклу — agent.steploop.run_loop (спільне з headless run_step
+        і субагентом); тут лише підготовка запиту (картинки, дослідницький крок) і хуки середовища (_UIHooks):
+        диспетчер із async-підтвердженням shell, картки активності, коментарі користувача по ходу, проміжні
+        перевірки планувальника. Додає ОДНЕ повідомлення-крок із катом «хід виконання»."""
+        from agent.agent_loop import (SYSTEM as EXEC_SYSTEM, is_research_step, research_report)
+        from agent.steploop import LoopConfig, run_loop
         reg = default_registry()
         client = ctx.client
         user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
         async with self:
             imgs = self._recent_image_urls()             # скриншот/макет користувача — виконавцю теж
+            cid_live = self.current_id
         if is_research_step(step_text) and "investigate" in reg.names():      # дослідницький крок → субагент кодом
             async with self:
                 aid_sub = self._act_start("llm", "Субагент-дослідник", "читає файли в окремому контексті")
@@ -1661,133 +1712,14 @@ class State(rx.State):
         # сервер: довгу роботу не обмежуємо (стежимо за прогресом, LoopGuard); локальна модель — оцінка
         max_iters = limits.get().hard_iters or await asyncio.to_thread(
             lambda: _estimate_iters(step_text, context, client))
-        guard = LoopGuard()
-        actions: list[tuple[str, str]] = []   # (tool, result)
-        full_actions: list[tuple[str, dict, str]] = []   # (tool, args, result) — для точного звіту планувальнику
+        res = await run_loop(messages, registry=reg, ctx=ctx, client=client,
+                             hooks=_UIHooks(self, cid_live, stop_event, checkpoint), cfg=LoopConfig(max_iters=max_iters))
+        final, full_actions, stats = res.final, res.actions, res.stats
+        actions = [(n, r) for n, _a, r in full_actions]
         touched: list[str] = []               # файли, змінені цим кроком (для звірки)
-        stats: list[dict] = []                # client.last_stats кожного виклику моделі
-        final = ITER_LIMIT_MSG
-        nudged = False
-        since_cp = 0                          # дій від останньої проміжної перевірки планувальником
-        reads = ReadStreak()                  # «читання без дій»: підштовхуємо до висновку
-        async with self:
-            cid_live = self.current_id
-        for _ in range(max_iters):
-            if stop_event is not None and stop_event.is_set():
-                final = "зупинено користувачем"; break
-            for n in _LIVE_NOTES.get(cid_live, []):             # коментар користувача по ходу: показуємо виконавцю одразу,
-                if not n["seen"]:                               # а планувальник отримає його (не прибираємо) після кроку
-                    n["seen"] = True
-                    messages.append({"role": "user", "content":
-                                     "Коментар користувача, написаний ПІД ЧАС виконання (врахуй, якщо стосується цього "
-                                     "кроку; планувальник також його побачить і скоригує план):\n" + n["text"]})
-            async with self:
-                aid = self._act_start("llm", "Запит до моделі", f"повідомлень у контексті: {len(messages)}")
-            t_llm = time.monotonic()
-            msg = await asyncio.to_thread(
-                lambda: client.chat(messages, tools=reg.schema(), profile=config.EXECUTOR))
-            if client.last_stats:
-                stats.append(dict(client.last_stats))
-            n_calls = len(msg.get("tool_calls") or [])
-            async with self:
-                ls = client.last_stats or {}
-                self.ctx_live = int(ls.get("prompt", 0) or 0)
-                self._act_done(aid, f"{time.monotonic() - t_llm:.1f}с · ↑{ls.get('prompt', 0)} ↓{ls.get('out', 0)} токенів"
-                                    + (f" · викликів тулів: {n_calls}" if n_calls else " · текстова відповідь"))
-            calls, recovered = recover_tool_calls(msg)
-            if not calls:
-                content = (msg.get("content") or "").strip()
-                # Великий файл дочитується частинами — якщо модель не продовжила
-                # пагінацію сама, дочитуємо БЕЗ її участі (текстовий nudge тут
-                # ненадійний, бачили живцем 15+ ідентичних повторів). Див. pending_continuation.
-                cont = pending_continuation(messages)
-                if cont is not None:
-                    calls, recovered = [cont], True
-                # Підштовхуємо РІВНО ОДИН раз, незалежно від того, чи вже були дії
-                # раніше у цьому кроці (живий кейс на account_test_14.py: модель
-                # почитала файл, потім видала порожню відповідь). НЕ ехо-имо
-                # зламаний/порожній текст назад як assistant. Див. agent_loop.should_nudge.
-                elif should_nudge(content, nudged):
-                    nudged = True
-                    messages.append({"role": "user", "content": NUDGE_TEXT})
-                    continue
-                else:
-                    final = content; break
-            messages.append({"role": "assistant", "content": "" if recovered else msg.get("content", ""),
-                             "tool_calls": calls})
-            for call in calls:
-                name = call.get("function", {}).get("name", "")
-                args = _args(call)
-                result = await self._dispatch_tool(reg, name, args, ctx)
-                actions.append((name, result))
-                full_actions.append((name, args, result))
-                if act.result_ok(result):
-                    touched.extend(orch.touched_paths(name, args))
-                messages.append({"role": "tool", "content": result})
-                guard.observe(name, args, result)
-                reads.observe(name)
-            verdict = guard.check()
-            if verdict:
-                kind, reason = verdict
-                _log.warning("зациклення (%s): %s | останній результат: %s", kind, reason,
-                             guard.last_result[:120].replace(chr(10), " "))
-                if kind == "stop":
-                    final = guard.stuck_message(reason)
-                    break
-                messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason, last=guard.last_result[:300])})
-                async with self:
-                    self._append("assistant", f"⚠ Помітив повтор без прогресу ({reason}) — прошу змінити підхід.", "note")
-            rv = reads.verdict()
-            if rv == "force":
-                out = await asyncio.to_thread(finalize, messages, client)
-                if out:
-                    final = out
-                    break
-            elif rv == "warn":
-                messages.append({"role": "user", "content": READ_NUDGE})
-            since_cp += len(calls)
-            if checkpoint is not None and since_cp >= CHECKPOINT_EVERY:      # проміжний звіт планувальнику
-                since_cp = 0
-                dec = await checkpoint(list(full_actions))
-                if dec.action != "continue":
-                    final = f"{CHECKPOINT_PREFIX}: {dec.comment or 'планувальник змінює підхід'}"
-                    break
-                if dec.comment:
-                    messages.append({"role": "user", "content": "Планувальник переглянув виконані дії й каже продовжувати: "
-                                                                + dec.comment})
-            ls = getattr(client, "last_stats", None) or {}
-            win = limits.get().context_tokens
-            if ls and win and ls.get("prompt", 0) >= COMPACT_RATIO * win:
-                freed = compact_tool_results(messages)
-                if ls.get("prompt", 0) >= SUMMARIZE_RATIO * win:        # не вистачило — підсумок від моделі
-                    async with self:
-                        aid_sum = self._act_start("llm", "Стиснення контексту", "підсумок історії кроку від моделі")
-                    t_sum = time.monotonic()
-                    done, b4, af = await asyncio.to_thread(summarize_history, messages, client, win)
-                    async with self:
-                        self._act_done(aid_sum, f"{time.monotonic() - t_sum:.1f}с · " +
-                                       (f"{b4} → {af} символів" if done else "пропущено"), ok=done)
-                        if done:
-                            self._apply_compress_events(cid_live, [("історія кроку", b4, af, "")])
-                    if done:
-                        continue
-                if freed and context_full(ls.get("prompt", 0), win):
-                    continue                              # стиснули старі результати — крок може завершитись
-            if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):
-                if actions and not reads.acted:        # лише читали — висновок із зібраного (після стиснення)
-                    compact_tool_results(messages, keep_last=2, head=300)
-                    out = await asyncio.to_thread(finalize, messages, client)
-                    if out:
-                        final = out
-                        break
-                final = (f"{CONTEXT_FULL_PREFIX} ({ls.get('prompt')} токенів). "
-                         "Розбийте задачу на менші кроки.")
-                break
-        else:
-            if actions and not reads.acted:            # бюджет вичерпано, але були лише читання — просимо висновок
-                out = await asyncio.to_thread(finalize, messages, client)
-                if out:
-                    final = out
+        for name, args, result in full_actions:
+            if act.result_ok(result):
+                touched.extend(orch.touched_paths(name, args))
         log = [f"{n} -> {r[:80]}" for n, r in actions]
 
         parts: list[str] = []

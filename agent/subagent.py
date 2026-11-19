@@ -1,9 +1,12 @@
 """Субагент-дослідник: окремий цикл з ЧИСТИМ контекстом для кроків, що багато читають.
 
-Ідея (перший етап перебудови): сирі виводи (читання файлів, списки тек, пошук) лишаються всередині
-субагента, а в головний контекст виконавця повертається лише КОРОТКИЙ висновок. Субагент лише
-читає (list_dir, read_file, read_attachment, web_search) — нічого не змінює й не запускає команд,
-тож не потребує підтверджень і безпечний.
+Ідея: сирі виводи (читання файлів, списки тек, пошук) лишаються всередині субагента, а в головний контекст
+виконавця повертається лише КОРОТКИЙ висновок. Субагент лише читає (list_dir, read_file, read_attachment,
+web_search) — нічого не змінює й не запускає команд, тож не потребує підтверджень і безпечний.
+
+Цикл — те саме ядро, що в виконавця (agent.steploop), з іншим налаштуванням: без дочитування/nudge, без підсумку
+історії, свій малий бюджет (MAX_ITERS), а замість «невдачі» (ліміт, зациклення, повне вікно) — примусовий висновок
+зі зібраного.
 
 Літерали: субагент нічого не пише, а в висновку просимо НЕ переказувати довгі значення (токени,
 ключі, base64, великі рядки) — лише вказувати файл і місце, звідки їх копіювати інструментами
@@ -11,16 +14,12 @@ edit_file/create_from_source. Так шар літералів (literals.py) л�
 """
 from __future__ import annotations
 
-import re
-
-from . import config, limits, logs
+from . import logs
 from .literals import mask_long
-from .loopguard import LoopGuard
 from .toolkit import Tool, ToolContext, ToolRegistry, default_registry
 
 READ_ONLY = ("list_dir", "read_file", "read_attachment", "web_search")
 MAX_ITERS = 12            # бюджет читань субагента (далі — примусовий висновок)
-WARN_AT = 8
 REPORT_MAX = 1800
 
 SYSTEM = (
@@ -31,6 +30,7 @@ SYSTEM = (
     "the file path and where to find them instead; do not paste whole files, quote only the few key lines. "
     "Answer in the language of the task. When you have enough, stop calling tools and give the conclusion."
 )
+
 
 def readonly_registry() -> ToolRegistry:
     full = default_registry()
@@ -51,47 +51,29 @@ def _clip_report(text: str) -> str:
 
 def investigate(task: str, ctx: ToolContext, client=None, max_iters: int = MAX_ITERS) -> str:
     """Виконати дослідження в ізольованому контексті. Повертає короткий висновок + службовий рядок."""
-    from .agent_loop import _args, recover_tool_calls          # лениво: agent_loop імпортує toolkit
+    from .agent_loop import ITER_LIMIT_MSG, finalize          # лениво: agent_loop імпортує toolkit
+    from .loopguard import CONTEXT_FULL_PREFIX
+    from .steploop import LoopConfig, LoopHooks, run_loop, run_sync
     client = client or ctx.client
     if client is None:
         return "субагент недоступний: немає клієнта моделі"
-    from .agent_loop import COMPACT_RATIO, compact_tool_results, finalize
-    from .loopguard import context_full
-    reg = readonly_registry()
+
+    class _Hooks(LoopHooks):
+        async def dispatch(self, registry, name, args, ctx_):
+            if name not in READ_ONLY:
+                return f"тул {name} недоступний субагенту (лише читання)"
+            return await super().dispatch(registry, name, args, ctx_)
+
     messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": task}]
-    guard, n_calls, final = LoopGuard(), 0, ""
-    log = logs.get("tools")
-    win = limits.get().context_tokens
-    for it in range(max_iters):
-        msg = client.chat(messages, tools=reg.schema(), profile=config.EXECUTOR)
-        calls, recovered = recover_tool_calls(msg)
-        if not calls:
-            final = (msg.get("content") or "").strip()
-            break
-        messages.append({"role": "assistant", "content": "" if recovered else msg.get("content", ""), "tool_calls": calls})
-        for call in calls:
-            name = call.get("function", {}).get("name", "")
-            args = _args(call)
-            result = reg.dispatch(name, args, ctx) if name in READ_ONLY else f"тул {name} недоступний субагенту (лише читання)"
-            n_calls += 1
-            messages.append({"role": "tool", "content": result})
-            guard.observe(name, args, result)
-        verdict = guard.check()
-        if verdict:
-            if verdict[0] == "stop":
-                break                                           # зациклився — нижче просимо висновок зі зібраного
-            messages.append({"role": "user", "content": "Не повторюй ті самі дії. Дай висновок із того, що вже знайдено."})
-        elif it + 1 == WARN_AT:
-            messages.append({"role": "user", "content": "Ти вже прочитав достатньо. Якщо можеш відповісти — дай висновок зараз, без нових викликів."})
-        ls = getattr(client, "last_stats", None) or {}
-        if ls and win and ls.get("prompt", 0) >= COMPACT_RATIO * win:
-            compact_tool_results(messages, keep_last=4, head=400)     # старі виводи не мають переповнити вікно субагента
-            if context_full(ls.get("prompt", 0), win):
-                break
-    if not final:
-        # бюджет/контекст вичерпано — висновок із зібраного, без тулів (а не «невдача»)
+    cfg = LoopConfig(max_iters=max_iters, nudge=False, summarize=False, finalize_on_stuck=True,
+                     compact_keep=4, compact_head=400)     # старі виводи не мають переповнити вікно субагента
+    res = run_sync(run_loop(messages, registry=readonly_registry(), ctx=ctx, client=client, hooks=_Hooks(), cfg=cfg))
+    final = res.final
+    if not final or final == ITER_LIMIT_MSG or final.startswith(CONTEXT_FULL_PREFIX):
+        # бюджет/контекст вичерпано, зациклення чи порожня відповідь — висновок із зібраного, без тулів (а не «невдача»)
         final = finalize(messages, client) or "(висновку нема: субагент не встиг нічого з'ясувати)"
-    log.info("субагент: %d дій, висновок %d симв.", n_calls, len(final))
+    n_calls = len(res.actions)
+    logs.get("tools").info("субагент: %d дій, висновок %d симв.", n_calls, len(final))
     return f"{_clip_report(final)}\n\n[субагент: {n_calls} дій читання; сирі виводи в контекст не потрапили]"
 
 
