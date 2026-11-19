@@ -35,7 +35,14 @@ def main() -> None:
     e = cv.build(window=131_072, system="x", tools_tok=10, summary_budget=32_000)
     assert [r["key"] for r in e["rows"]] == ["system", "tools", "summary", "messages"]
     assert e["rows"][2]["note"] == "порожній"
-    print("OK: context_view — оцінка токенів, вікно історії, вкладення, дані про стиснення біля пунктів")
+    # нотатки сесії (код-режим): окремий рядок лише коли індекс не порожній; стиснення історії кроку — біля «Повідомлень»
+    nb = "Нотатки цієї сесії (…):" + chr(10) + "- a: суть" + chr(10) + "- b: суть"
+    d2 = cv.build(window=65_536, system="s" * 280, tools_tok=500, notes_note=nb, messages=msgs,
+                  compressions=[{"what": "історія кроку", "before": 40_000, "after": 6_000}])
+    r2 = {r["key"]: r for r in d2["rows"]}
+    assert r2["notes"]["tokens"] > 0 and "нотаток у переліку: 2" in r2["notes"]["note"] and r2["notes"]["label"] == "Нотатки сесії"
+    assert "40 000 → 6 000" in r2["messages"]["compress"] and "notes" not in {r["key"] for r in d["rows"]}
+    print("OK: context_view — оцінка токенів, вікно історії, вкладення, дані про стиснення біля пунктів, нотатки сесії")
 
 
 if __name__ == "__main__":

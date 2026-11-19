@@ -16,7 +16,7 @@ CHARS_PER_TOKEN = 2.8
 # Кольори сегментів (узгоджені зі списком)
 COLORS = {"system": "#e8803a", "tools": "#2fb392", "summary": "#a78bfa", "topics": "#38bdf8",
           "messages": "#4f8cff", "attachments": "#e5c04b", "project": "#f472b6", "map": "#34d399",
-          "free": "#4b4b4b"}
+          "notes": "#fb923c", "free": "#4b4b4b"}
 
 
 def est_tokens(text: str) -> int:
@@ -52,7 +52,7 @@ def compress_note(compressions: list[dict], what: str, limit_chars: int | None =
 
 
 def build(*, window: int, system: str, tools_tok: int, project: str = "", project_map: str = "",
-          topics_note: str = "",
+          topics_note: str = "", notes_note: str = "",
           summary: str = "", summary_budget: int = 0, topic_budget: int = 0, digest_budget: int = 0,
           messages: list[dict] | None = None, history_window: int = 20,
           attachments: list[dict] | None = None, inline_budget: int = 0,
@@ -81,6 +81,9 @@ def build(*, window: int, system: str, tools_tok: int, project: str = "", projec
     add("summary", "Підсумок розмови", est_tokens(summary),
         note=f"{_fmt_chars(len(summary))} симв." if summary else "порожній",
         compress=compress_note(compressions, "підсумок розмови", summary_budget))
+    if notes_note:                                   # індекс нотаток сесії (код-режим): зміст читається тулом recall
+        add("notes", "Нотатки сесії", est_tokens(notes_note),
+            note=f"нотаток у переліку: {notes_note.count(chr(10))}; зміст — тулом recall на вимогу")
     if topics_note:
         add("topics", "Теми (нотатки минулих розмов)", est_tokens(topics_note),
             note="лише перелік назв; вміст читається тулом на вимогу",
@@ -91,7 +94,8 @@ def build(*, window: int, system: str, tools_tok: int, project: str = "", projec
     inwin = ctx_msgs[-history_window:] if history_window else ctx_msgs
     dropped = len(ctx_msgs) - len(inwin)
     add("messages", "Повідомлення", sum(est_tokens(m["content"]) for m in inwin),
-        note=f"у вікні {len(inwin)} з {len(ctx_msgs)}" + (f"; {dropped} старіших замінює підсумок" if dropped else ""))
+        note=f"у вікні {len(inwin)} з {len(ctx_msgs)}" + (f"; {dropped} старіших замінює підсумок" if dropped else ""),
+        compress=compress_note(compressions, "історія кроку", prefix="виконання кроку: "))
 
     atts = attachments or []
     inl = [a for a in atts if a.get("inline")]

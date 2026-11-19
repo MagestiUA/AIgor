@@ -327,6 +327,7 @@ class State(rx.State):
     llm_port: str = ""
     llm_model: str = ""
     llm_context: str = ""
+    notes_rev: int = 0             # збільшується, коли змінились нотатки сесії → перерахунок панелі контексту
     llm_rev: int = 0               # збільшується при збереженні підключення → перерахунок панелі контексту
     llm_key_input: str = ""
     llm_key_saved: bool = False
@@ -540,12 +541,14 @@ class State(rx.State):
         elif not chat and self.project_root:
             project = load_project_doc(self.project_root) or ""
         topics_note = topics.available_topics_note(topics.list_topics()) if chat else ""
+        _ = self.notes_rev                                    # нотатки сесії змінились (remember / звіт субагента)
+        notes_note = sessionmem.index_block(cid) if (not chat and cid) else ""
         pmap_text = projectmap.context_block(self.project_root) if (not chat and self.project_root) else ""
         from agent.agent_loop import SYSTEM as EXEC_SYSTEM
         rep = cv.build(
             window=lim.context_tokens, system=CHAT_SYSTEM if chat else EXEC_SYSTEM,
             tools_tok=_tools_tokens(chat), project=project, project_map=pmap_text, topics_note=topics_note,
-            summary=self.context_summary,
+            notes_note=notes_note, summary=self.context_summary,
             summary_budget=lim.summary // 3 if chat else lim.summary,
             topic_budget=lim.topic, digest_budget=lim.digest, messages=msgs,
             history_window=lim.history_msgs, attachments=atts, inline_budget=lim.inline,
@@ -1604,6 +1607,8 @@ class State(rx.State):
         t0 = time.monotonic()
         result = await self._dispatch_tool_inner(reg, name, args, ctx)
         async with self:
+            if name in ("remember", "investigate"):
+                self.notes_rev += 1
             self._act_done(aid, f"{time.monotonic() - t0:.1f}с · " + act.clip_result(result),
                            ok=act.result_ok(result))
         return result
@@ -1648,6 +1653,7 @@ class State(rx.State):
             user += await asyncio.to_thread(research_report, step_text, context, ctx, reg)
             async with self:
                 self._act_done(aid_sub, f"{time.monotonic() - t_sub:.1f}с · висновок отримано")
+                self.notes_rev += 1
         umsg = {"role": "user", "content": user}
         if imgs:
             umsg["images"] = imgs
@@ -1762,8 +1768,7 @@ class State(rx.State):
                         self._act_done(aid_sum, f"{time.monotonic() - t_sum:.1f}с · " +
                                        (f"{b4} → {af} символів" if done else "пропущено"), ok=done)
                         if done:
-                            self._append("assistant", f"🗜 Історію кроку стиснуто підсумком від моделі: {b4} → {af} символів "
-                                                      "(контекст кроку наближався до межі).", "note")
+                            self._apply_compress_events(cid_live, [("історія кроку", b4, af, "")])
                     if done:
                         continue
                 if freed and context_full(ls.get("prompt", 0), win):
