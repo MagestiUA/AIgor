@@ -44,6 +44,7 @@ def _ollama_messages(messages: list[dict]) -> list[dict]:
 class OllamaClient:
     def __init__(self, model: str = config.MODEL, host: str = config.HOST):
         self.model = model
+        self.single_model = False       # True: ігнорувати model/num_ctx профілів (див. _eff)
         self.host = host.rstrip("/")
         self.last_stats: dict = {}      # stats останнього chat() — для лічильника токенів
         self.last_error: str = ""       # остання помилка з'єднання (діагностика)
@@ -117,6 +118,15 @@ class OllamaClient:
             pass
 
     # ── Запит ───────────────────────────────────────────────────────────────
+    def _eff(self, profile: dict) -> tuple[str, int]:
+        """(модель, num_ctx) для виклику. Звичайний режим — з профілю ролі (як було). single_model=True (локальний режим
+        застосунку) — ОДНА модель для всіх ролей і вікно з налаштувань (limits), тож локальна модель працює за тими ж
+        правилами/бюджетами, що й серверна."""
+        if self.single_model:
+            from . import limits
+            return self.model, limits.get().context_tokens
+        return profile.get("model") or self.model, profile["num_ctx"]
+
     def chat(self, messages: list[dict], tools: list | None = None,
              profile: dict = config.EXECUTOR, fmt: str | dict | None = None) -> dict:
         """Один виклик /api/chat. Повертає message (dict) з полями
@@ -124,7 +134,7 @@ class OllamaClient:
         fmt="json" або JSON-schema -> примусово валідний JSON у content.
         Модель беремо з profile["model"], якщо є (EXECUTOR/PLANNER можуть мати різні
         моделі) — інакше дефолт клієнта (self.model)."""
-        model = profile.get("model") or self.model
+        model, num_ctx = self._eff(profile)
         payload = {
             "model": model,
             "messages": _ollama_messages(messages),
@@ -132,7 +142,7 @@ class OllamaClient:
             "think": profile["think"],
             "options": {
                 "temperature": profile["temperature"],
-                "num_ctx": profile["num_ctx"],
+                "num_ctx": num_ctx,
                 **profile.get("options", {}),     # доп. семплінг профілю (напр. DRY)
             },
         }
@@ -156,7 +166,7 @@ class OllamaClient:
         проміжні чанки -> дельти content/thinking; фінальний -> done зі stats.
         stop_event: threading.Event — якщо встановлено, стрім переривається після
         поточного чанку (частковий результат зберігається)."""
-        model = profile.get("model") or self.model
+        model, num_ctx = self._eff(profile)
         payload = {
             "model": model,
             "messages": _ollama_messages(messages),
@@ -164,7 +174,7 @@ class OllamaClient:
             "think": profile["think"],
             "options": {
                 "temperature": profile["temperature"],
-                "num_ctx": profile["num_ctx"],
+                "num_ctx": num_ctx,
                 **profile.get("options", {}),     # доп. семплінг профілю (напр. DRY)
             },
         }

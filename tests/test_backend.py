@@ -31,7 +31,8 @@ def main() -> None:
                          "llm_api_key": "k", "llm_model": "mm"})
     assert r == {"backend": "openai", "base_url": "http://srv:9/v1", "model": "mm", "api_key": "k"}
     r = backend.resolve({})
-    assert r["base_url"] == config.REMOTE_BASE_URL and r["model"] == config.REMOTE_MODEL
+    assert r["base_url"] == config.REMOTE_BASE_URL and r["model"] == config.LOCAL_MODEL      # дефолтний бекенд — локальний
+    assert backend.resolve({"llm_backend": "openai"})["model"] == config.REMOTE_MODEL
 
     c = backend.make_client({"llm_backend": "openai", "llm_host": "srv", "llm_port": "9",
                              "llm_api_key": "k"})

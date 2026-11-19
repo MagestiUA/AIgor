@@ -40,7 +40,7 @@ def resolve(settings: dict | None = None) -> dict:
     return {
         "backend": backend,
         "base_url": base_url,
-        "model": s.get("llm_model") or config.REMOTE_MODEL,
+        "model": s.get("llm_model") or (config.REMOTE_MODEL if backend == "openai" else config.LOCAL_MODEL),
         "api_key": s.get("llm_api_key") or "",       # порожній -> клієнт візьме з env
     }
 
@@ -51,7 +51,9 @@ def make_client(settings: dict | None = None):
         from .llm_openai import OpenAIClient
         return OpenAIClient(base_url=cfg["base_url"], model=cfg["model"], api_key=cfg["api_key"])
     from .llm import OllamaClient
-    return OllamaClient()
+    c = OllamaClient(model=(settings if settings is not None else S.load()).get("llm_model") or config.LOCAL_MODEL)
+    c.single_model = True                      # локально: одна модель на всі ролі, вікно з limits (як на сервері)
+    return c
 
 
 def test_connection(base_url: str, api_key: str = "", timeout: float = 15.0) -> tuple[bool, str, list[str]]:

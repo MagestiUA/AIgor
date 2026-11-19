@@ -20,6 +20,10 @@ from __future__ import annotations
 HOST  = "http://127.0.0.1:11434"
 MODEL = "gemma4:26b-a4b-it-qat"   # дефолт OllamaClient; профілі нижче перекривають своїм "model"
 
+# Локальний режим застосунку: ОДНА модель на всі ролі й власний розмір вікна (за бенчмарком, див. LOCAL_CTX нижче).
+LOCAL_MODEL = "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL"   # те саме сімейство, що на сервері (Qwen3.8-27B)
+LOCAL_CTX = 65536
+
 REQUEST_TIMEOUT = 600
 
 def load_dotenv(path=None) -> None:

@@ -325,6 +325,7 @@ class State(rx.State):
     llm_host: str = ""
     llm_port: str = ""
     llm_model: str = ""
+    llm_context: str = ""
     llm_key_input: str = ""
     llm_key_saved: bool = False
     llm_test_msg: str = ""
@@ -476,7 +477,7 @@ class State(rx.State):
             rows.append({"label": "Модель", "value": eff["model"] or "авто"})
         else:
             rows.append({"label": "Бекенд", "value": "локально (Ollama)"})
-            rows.append({"label": "Модель", "value": config.MODEL})
+            rows.append({"label": "Модель", "value": eff["model"]})
         rows.append({"label": "Режим", "value": "Чат" if self.mode == "chat" else "Код"})
         rows.append({"label": "Версія", "value": logs.app_version()})
         if self.mode == "code":
@@ -945,6 +946,7 @@ class State(rx.State):
         eff = backend.resolve(d)
         self.llm_backend = eff["backend"]
         self.llm_model = d.get("llm_model", "")
+        self.llm_context = str(d.get("llm_context", "") or "")
         self.llm_key_saved = bool(d.get("llm_api_key"))
         A.migrate_legacy()                                       # вкладення зі старого місця (<репо>/.attachments)
         self.gpu_enabled = bool(d.get("gpu_monitor", True))
@@ -1057,6 +1059,10 @@ class State(rx.State):
         self.llm_model = v
 
     @rx.event
+    def set_llm_context(self, v: str):
+        self.llm_context = "".join(ch for ch in v if ch.isdigit())[:7]
+
+    @rx.event
     def set_llm_key_input(self, v: str):
         self.llm_key_input = v
 
@@ -1067,7 +1073,8 @@ class State(rx.State):
         from agent import settings as S
         cur = S.load()
         new = {**cur, "llm_backend": self.llm_backend, "llm_host": self.llm_host.strip(),
-               "llm_port": self.llm_port.strip(), "llm_model": self.llm_model.strip()}
+               "llm_port": self.llm_port.strip(), "llm_model": self.llm_model.strip(),
+               "llm_context": self.llm_context.strip()}
         if self.llm_key_input.strip():
             new["llm_api_key"] = self.llm_key_input.strip()
         S.save(new)
@@ -2868,6 +2875,14 @@ def llm_connection_section() -> rx.Component:
                                  placeholder="авто (перша на сервері)", class_name="flex-1")),
         gap="2", class_name="w-full",
     )
+    ctx_field = field("Вікно (токени)", rx.input(
+        value=State.llm_context, on_change=State.set_llm_context, class_name="flex-1",
+        placeholder=rx.cond(State.llm_backend == "openai", "пусто = 262144 (вікно сервера)", "пусто = за замовчуванням (65536)")))
+    local = rx.vstack(
+        field("Модель", rx.input(value=State.llm_model, on_change=State.set_llm_model, class_name="flex-1",
+                                 placeholder="пусто = Qwen3.8-27B (UD-Q3_K_XL)")),
+        gap="2", class_name="w-full",
+    )
     return rx.vstack(
         rx.text("Підключення до LLM", class_name="text-xs text-gray-500 uppercase tracking-wide"),
         rx.segmented_control.root(
@@ -2875,7 +2890,11 @@ def llm_connection_section() -> rx.Component:
             rx.segmented_control.item("Сервер (OpenAI API)", value="openai"),
             value=State.llm_backend, on_change=State.set_llm_backend, size="2", class_name="w-full",
         ),
-        rx.cond(State.llm_backend == "openai", remote, rx.fragment()),
+        rx.cond(State.llm_backend == "openai", remote, local),
+        ctx_field,
+        rx.text("Вікно визначає, коли чат стискається: бюджети підсумків і вкладень масштабуються під нього. Для локальної "
+                "моделі не ставте більше, ніж вміщає відеопам'ять (інакше модель вилізе на CPU й сповільниться).",
+                class_name="text-xs text-gray-500"),
         rx.hstack(
             rx.button("Перевірити", variant="soft", on_click=State.test_llm_connection,
                       loading=State.llm_testing),

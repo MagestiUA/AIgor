@@ -68,10 +68,12 @@ def get(settings: dict | None = None) -> Limits:
     from . import backend
     from . import settings as S
     s = settings if settings is not None else S.load()
-    if backend.resolve(s)["backend"] != "openai":
-        return LOCAL
     try:
-        win = int(str(s.get("llm_context") or "0").strip() or 0)      # свій розмір вікна (локальна модель)
+        win = int(str(s.get("llm_context") or "0").strip() or 0)      # свій розмір вікна з налаштувань
     except ValueError:
         win = 0
+    if backend.resolve(s)["backend"] != "openai":
+        from . import config
+        # локальний режим: ті самі «серверні» правила, але бюджети (ліміти перед стисненням тощо) під обране вікно
+        return scaled(REMOTE, win if win >= 2048 else config.LOCAL_CTX)
     return scaled(REMOTE, win) if 2048 <= win < REMOTE.context_tokens else REMOTE
