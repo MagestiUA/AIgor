@@ -87,6 +87,12 @@ REVIEW_SYSTEM = (
     "what it was asked (e.g. exit code 0, expected output), choose continue — do not re-plan because of "
     "wording. If a USER COMMENT is given, it has priority: the user watched the work live and is correcting "
     "you — adapt the plan to it (revise pending steps / add steps), and acknowledge it in comment. "
+    "If the step was STOPPED (iteration limit, loop detected, context full), it was too big or the approach is wrong: "
+    "choose revise and replace that step with 2-4 SMALL steps, each ONE concrete action with a checkable result "
+    "(one command / one file), and do not repeat the approach that looped. "
+    "If the status says the step is STILL IN PROGRESS (interim check after several actions): continue = the "
+    "executor is on track (comment may give it a short hint); revise = the approach is wrong or the step is too "
+    "big - re-describe THIS step (smaller / different approach) and/or add steps; stop = you need the user. "
     "comment: 1-2 short sentences in the user's language, first person, saying what happened "
     "(cite the command and its key output when it matters) and what you do next."
 )
@@ -108,7 +114,7 @@ REVIEW_SCHEMA = {
 def build_review_prompt(plan_text: str, step, ok: bool, final: str, report: str,
                         user_notes: list[str] | None = None) -> str:
     p = (f"{plan_text}\n\nЩойно виконано крок #{step.id}: {step.description}\n"
-         f"Статус за оцінкою виконавця: {'ВИКОНАНО' if ok else 'НЕ ЗАВЕРШЕНО'}\n"
+         f"Статус за оцінкою виконавця: {'КРОК ЩЕ ТРИВАЄ — проміжна перевірка' if ok is None else ('ВИКОНАНО' if ok else 'НЕ ЗАВЕРШЕНО')}\n"
          f"Підсумок виконавця: {(final or '—')[:600]}\n\n"
          f"ТОЧНІ ФАКТИ (команди та їх вивід, змінені файли):\n{report or '(дій не було)'}")
     if user_notes:

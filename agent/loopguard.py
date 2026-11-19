@@ -40,6 +40,7 @@ WARN_TEXT = (
 )
 STUCK_PREFIX = "крок зупинено: агент зациклився"       # callers трактують як невдачу кроку
 CONTEXT_FULL_PREFIX = "крок зупинено: контекст майже заповнений"
+CHECKPOINT_PREFIX = "крок перервано планувальником на проміжній перевірці"
 
 
 def _sig(name: str, args: dict) -> str:

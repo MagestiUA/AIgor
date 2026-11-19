@@ -63,7 +63,7 @@ class FakeState:
         self.pending_saved = plan
         self.has_pending = True
 
-    async def _run_tool_step(self, step_text, ctx, title="", context="", stop_event=None):
+    async def _run_tool_step(self, step_text, ctx, title="", context="", stop_event=None, checkpoint=None):
         self.step_contexts.append(context)
         self.run_log.append((title, step_text))
         final, touched = self.script(step_text, self)

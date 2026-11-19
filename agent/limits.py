@@ -46,7 +46,7 @@ LOCAL = Limits(chunk=32_000, inline=32_000, summary=32_000, digest=96_000, topic
 # промпти, тули й відповідь.
 REMOTE = Limits(chunk=120_000, inline=200_000, summary=100_000, digest=200_000,
                 topic=200_000, history_msgs=40, max_file=2 * 1024 * 1024,
-                file_chars=2 * 1024 * 1024, read_chars=150_000, context_tokens=262_144, hard_iters=400, map_chars=14000, weak_model_fixes=False)
+                file_chars=2 * 1024 * 1024, read_chars=150_000, context_tokens=262_144, hard_iters=60, map_chars=14000, weak_model_fixes=False)
 
 FORCE: Limits | None = None
 

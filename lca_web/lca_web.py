@@ -28,7 +28,7 @@ from agent import activity as act
 from agent import context_view as cv
 from agent import orchestration as orch
 from agent import projectmap
-from agent.loopguard import (CONTEXT_FULL_PREFIX, WARN_TEXT, LoopGuard, context_full)
+from agent.loopguard import (CHECKPOINT_PREFIX, CONTEXT_FULL_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from agent import limits
 from agent import logs
 from agent import chat_projects as CP
@@ -1421,10 +1421,27 @@ class State(rx.State):
             if step.is_noop:
                 plan.set_result(step.id, "done", "inline")
                 continue
+            cp_holder: dict = {"notes": [], "dec": None}
+
+            async def checkpoint(acts, _step=step, _h=cp_holder):
+                """Проміжний звіт планувальнику посеред кроку: точні факти дій на цей момент."""
+                live = _take_live_notes(cid)
+                if live:
+                    _h["notes"] += live
+                    plan.facts["коментарі користувача"] = " | ".join(
+                        [x for x in [plan.facts.get("коментарі користувача", "")] if x] + [n[:300] for n in live])[-600:]
+                _step.report = review.facts_report(acts)
+                may_cp = bool(live) or replans < review.MAX_REPLANS
+                dec = await self._review_after_step(plan, _step, None, "", client, may_cp, live)
+                if dec.action != "continue":
+                    _h["dec"] = dec
+                return dec
+
             final, log = await self._run_tool_step(step.description, ctx,
                                                    title=step.description[:60],
                                                    context=self._step_context(plan, step, root, att_note),
-                                                   stop_event=stop_ev)
+                                                   stop_event=stop_ev,
+                                                   checkpoint=checkpoint if len(plan.steps) > 1 else None)
             ok = bool(log) and not is_incomplete(final)
             plan.set_result(step.id, "done" if ok else "failed", final or "—")
             async with self:
@@ -1436,14 +1453,16 @@ class State(rx.State):
                 plan.facts["змінені файли"] = ", ".join(dict.fromkeys(
                     f for fl in touched_by_step.values() for f in fl))[:500]
             more = any(s.status != "done" for s in plan.steps)
-            notes = _take_live_notes(cid)                      # коментарі користувача, написані під час кроку
+            notes = cp_holder["notes"] + _take_live_notes(cid)  # коментарі користувача, написані під час кроку
+            if cp_holder["notes"]:
+                notes = list(dict.fromkeys(notes))
             if notes:
                 plan.facts["коментарі користувача"] = " | ".join(
                     [x for x in [plan.facts.get("коментарі користувача", "")] if x] + [n[:300] for n in notes])[-600:]
             if (((len(plan.steps) > 1 and (more or not ok)) or notes)
                     and not (stop_ev is not None and stop_ev.is_set())):
                 may = bool(notes) or replans < review.MAX_REPLANS      # коментар користувача обмеженням не глушимо
-                dec = await self._review_after_step(plan, step, ok, final, client, may, notes)
+                dec = cp_holder["dec"] or await self._review_after_step(plan, step, ok, final, client, may, notes)
                 if review.apply_decision(plan, dec, step.id, may):
                     replans += 1
                     if step.status == "pending":               # невдалий крок переписано — пробуємо знову
@@ -1586,13 +1605,13 @@ class State(rx.State):
         return await asyncio.to_thread(lambda: reg.dispatch(name, args, ctx))
 
     async def _run_tool_step(self, step_text: str, ctx: ToolContext, title: str = "",
-                             context: str = "", stop_event=None):
+                             context: str = "", stop_event=None, checkpoint=None):
         """Async per-step tool-loop: модель кличе тули, ми диспетчеримо їх (виклик моделі
         — per-iteration через to_thread). run_shell, що потребує підтвердження, ставимо
         на async-паузу — діалог показується з контексту ЦІЄЇ події (дельта доходить), а
         не з відірваної корутини. Додає ОДНЕ повідомлення-крок із катом «хід виконання».
         Логіку дублюємо з agent_loop.run_step (той лишається для headless/тестів)."""
-        from agent.agent_loop import SYSTEM as EXEC_SYSTEM, _args, COMPACT_RATIO, compact_tool_results
+        from agent.agent_loop import SYSTEM as EXEC_SYSTEM, _args, COMPACT_RATIO, CHECKPOINT_EVERY, compact_tool_results
         reg = default_registry()
         client = ctx.client
         user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
@@ -1612,6 +1631,7 @@ class State(rx.State):
         stats: list[dict] = []                # client.last_stats кожного виклику моделі
         final = ITER_LIMIT_MSG
         nudged = False
+        since_cp = 0                          # дій від останньої проміжної перевірки планувальником
         async with self:
             cid_live = self.current_id
         for _ in range(max_iters):
@@ -1678,6 +1698,16 @@ class State(rx.State):
                 messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason, last=guard.last_result[:300])})
                 async with self:
                     self._append("assistant", f"⚠ Помітив повтор без прогресу ({reason}) — прошу змінити підхід.", "note")
+            since_cp += len(calls)
+            if checkpoint is not None and since_cp >= CHECKPOINT_EVERY:      # проміжний звіт планувальнику
+                since_cp = 0
+                dec = await checkpoint(list(full_actions))
+                if dec.action != "continue":
+                    final = f"{CHECKPOINT_PREFIX}: {dec.comment or 'планувальник змінює підхід'}"
+                    break
+                if dec.comment:
+                    messages.append({"role": "user", "content": "Планувальник переглянув виконані дії й каже продовжувати: "
+                                                                + dec.comment})
             ls = getattr(client, "last_stats", None) or {}
             win = limits.get().context_tokens
             if ls and win and ls.get("prompt", 0) >= COMPACT_RATIO * win:

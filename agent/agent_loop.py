@@ -12,13 +12,14 @@ import re
 from . import config
 from . import limits
 from . import logs
-from .loopguard import (CONTEXT_FULL_PREFIX, STUCK_PREFIX, WARN_TEXT, LoopGuard, context_full)
+from .loopguard import (CHECKPOINT_PREFIX, CONTEXT_FULL_PREFIX, STUCK_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from .llm import OllamaClient
 from .toolkit import ToolContext, ToolRegistry, default_registry
 
 ITER_LIMIT_MSG = "досягнуто ліміту ітерацій"   # крок НЕ завершено — не вважати «done»
 
 
+CHECKPOINT_EVERY = 10     # кожні стільки дій (викликів тулів) виконавець звітує планувальнику
 COMPACT_RATIO = 0.6        # з якої частки вікна починаємо стискати старі результати тулів
 COMPACT_KEEP = 6           # скільки останніх повідомлень (хвіст) не чіпаємо
 COMPACT_HEAD = 500         # скільки символів лишаємо від старого результату тулу
@@ -40,7 +41,7 @@ def compact_tool_results(messages: list[dict], keep_last: int = COMPACT_KEEP, he
 def is_incomplete(final: str | None) -> bool:
     """Крок НЕ завершено (ліміт / зациклення / переповнений контекст) — не вважати «done»."""
     f = final or ""
-    return f == ITER_LIMIT_MSG or f.startswith(STUCK_PREFIX) or f.startswith(CONTEXT_FULL_PREFIX)
+    return f == ITER_LIMIT_MSG or f.startswith(STUCK_PREFIX) or f.startswith(CONTEXT_FULL_PREFIX) or f.startswith(CHECKPOINT_PREFIX)
 
 SYSTEM = (
     "You are an execution agent for ONE task step on a Windows machine (PowerShell). "
