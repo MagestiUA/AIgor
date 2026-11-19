@@ -150,7 +150,7 @@ async def run_loop(messages: list, *, registry, ctx, client, hooks: LoopHooks, c
             actions.append((name, args, result))
             messages.append({"role": "tool", "content": result})
             guard.observe(name, args, result)
-            reads.observe(name)
+            reads.observe(name, args)
             await hooks.after_tool(name, args, result)
         verdict = guard.check()
         if verdict:

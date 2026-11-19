@@ -76,6 +76,34 @@ def main() -> None:
     cl = Client()                                                           # без тиску: бюджет MAX_ITERS → висновок
     out = subagent.investigate("де що?", ctx_for(cl), cl)
     assert "ВИСНОВОК" in out and f"{subagent.MAX_ITERS} дій" in out, out[-120:]
+    # 7) читальні команди консолі (grep/ls/cat/git log…) теж «читання без дій»; запуск програм, запис і перенаправлення — ні
+    from agent.shell_guard import is_read_command as R
+    for c in ('grep -rn "limits.get" agent', "rg -n foo | head -20", "Get-ChildItem -Recurse | Select-String x", "git log --oneline -5",
+              "ls -la; cat a.py", "findstr /s /n limits *.py", "type a.py 2>&1", "Get-Content x.log -Tail 20 2>$null"):
+        assert R(c), c
+    for c in ("python -m pytest", "pip install x", "git commit -m x", "git push", "echo hi > a.txt", "cat a.py > b.py", "grep x a | tee b",
+              "rm a.py", "sed -i s/a/b/ f", "Remove-Item a", "ls && python run.py", "", "Set-Content a.txt hi"):
+        assert not R(c), c
+    rs = AL.ReadStreak()
+    for _ in range(AL.READ_FORCE):
+        rs.observe("run_shell", {"command": 'grep -rn "x" .'})
+    assert not rs.acted and rs.verdict() == "force"
+    rs = AL.ReadStreak()
+    rs.observe("run_shell", {"command": "python -m pytest"})
+    assert rs.acted
+    # ... і наскрізно: 20 різних grep-пошуків підряд → на 12-му примусовий висновок, а не 60 запусків
+    class GrepSpam(Client):
+        def chat(self, messages, tools=None, profile=None, fmt=None):
+            self.calls.append([dict(m) for m in messages])
+            if messages[-1]["role"] == "user" and "Досить збирати" in messages[-1]["content"]:
+                return {"content": "ВИСНОВОК: знайдено в a.py", "tool_calls": []}
+            self.n += 1
+            return {"content": "", "tool_calls": [{"function": {"name": "run_shell", "arguments": {"command": f"grep -rn pattern{self.n} ."}}}]}
+    cl = GrepSpam()
+    c7 = ctx_for(cl)
+    c7.permissions = {"edits": "auto", "shell": "auto"}
+    final, log = AL.run_step("Дізнайся, де використовується pattern", c7, cl, default_registry(), max_iters=40)
+    assert final == "ВИСНОВОК: знайдено в a.py" and len(log) == AL.READ_FORCE, (final, len(log))
     limits.FORCE = None
     print("OK: forced_conclusion — підказка/примус/бюджет, не чіпає кроки з діями, авто-делегування, субагент під тиском")
 

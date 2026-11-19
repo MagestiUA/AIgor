@@ -13,6 +13,7 @@ from . import config
 from . import limits
 from . import logs
 from .literals import mask_long
+from .shell_guard import is_read_command
 from .loopguard import (CHECKPOINT_PREFIX, CONTEXT_FULL_PREFIX, STUCK_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from .llm import OllamaClient
 from .toolkit import ToolContext, ToolRegistry, default_registry
@@ -131,9 +132,9 @@ class ReadStreak:
         self.acted = False
         self.warned = False
 
-    def observe(self, name: str) -> None:
-        if name in READ_ONLY_TOOLS:
-            self.streak += 1
+    def observe(self, name: str, args: dict | None = None) -> None:
+        if name in READ_ONLY_TOOLS or (name == "run_shell" and is_read_command((args or {}).get("command", ""))):
+            self.streak += 1                    # у т.ч. читальна команда консолі (grep, ls, cat, git log…)
         else:
             self.streak = 0
             self.acted = True
