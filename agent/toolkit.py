@@ -129,7 +129,8 @@ def _resolve(ctx: ToolContext, path: str) -> Path:
     root = ctx.root.resolve()
     p = Path(path)
     full = (p if p.is_absolute() else root / p).resolve()
-    for base in [root, *(Path(x).resolve() for x in ctx.extra_roots)]:     # корінь + додані теки
+    from .spill import SPILL_ROOT
+    for base in [root, *(Path(x).resolve() for x in ctx.extra_roots), SPILL_ROOT.resolve()]:   # корінь + додані теки + виводи тулів
         if full == base or base in full.parents:
             return full
     raise ValueError(f"шлях поза межами проєкту заборонено: {path}")
@@ -282,7 +283,11 @@ def h_run_shell(args, ctx):
         r = T.run_shell(cmd, cwd=str(ctx.root))
         if not r.allowed:
             return f"заблоковано allowlist: {cmd}"
-    out = (r.stdout or r.stderr or f"rc={r.returncode}")[:2000]
+    from .spill import spill
+    raw = r.stdout or r.stderr or f"rc={r.returncode}"
+    if r.returncode not in (0, None) and r.stdout and r.stderr:
+        raw = f"{r.stdout}\n[stderr]\n{r.stderr}"             # помилка команди — теж у вивід, не лише stdout
+    out = spill(raw, "shell")                                  # довгий вивід: голова+хвіст у контекст, повний — у файл
     if r.returncode not in (0, None) and out != f"rc={r.returncode}":
         out += f"\n[код завершення: {r.returncode}]"      # без цього планувальник не бачить, що команда впала
     return out

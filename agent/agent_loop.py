@@ -95,11 +95,14 @@ _CHANGE = re.compile(r"\b(виправ\w*|зміни|змінити|додай|�
                      r"run|install|delete|rename)\b", re.I)
 
 
+_QUESTION = re.compile(r"^\s*(як|де|чому|що|яким|які|яка|який|куди|звідки|how|where|why|what)", re.I)
+
+
 def is_research_step(step_text: str) -> bool:
     """Крок суто «дізнатись/знайти» (без змін і команд): його варто віддати субагентові кодом, а не покладатись на
     те, що слабка модель сама делегує (живий тест: вона викликає investigate, а потім усе одно перечитує файли)."""
     t = step_text or ""
-    return bool(_RESEARCH.search(t)) and not _CHANGE.search(t)
+    return bool(_RESEARCH.search(t) or _QUESTION.search(t)) and not _CHANGE.search(t)
 
 
 def research_report(step_text: str, context: str, ctx, registry) -> str:
