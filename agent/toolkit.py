@@ -31,6 +31,7 @@ class ToolContext:
     attachments_dir: Path | None = None  # тека з файлами вкладень сесії (для read_attachment)
     track_project: bool = False          # оновлювати «Карту проєкту» при read/write (код-режим)
     extra_roots: list = field(default_factory=list)   # додаткові теки проєкту: читання/запис за абсолютним шляхом
+    session_id: str = ""                 # id чату — для нотаток сесії (remember/recall)
 
 
 @dataclass
@@ -319,6 +320,30 @@ def h_create_from_source(args, ctx):
     return _apply_or_reject(res, target, ctx, "створено")
 
 
+def h_remember(args, ctx):
+    from . import sessionmem
+    if not ctx.session_id:
+        return "нотатки недоступні: немає активної сесії"
+    name = (args.get("name") or "").strip()
+    text = (args.get("text") or "").strip()
+    if not name or not text:
+        return "потрібні name і text"
+    slug = sessionmem.save_note(ctx.session_id, name, text)
+    return f"нотатку збережено: {slug}" if slug else "не вдалось зберегти нотатку"
+
+
+def h_recall(args, ctx):
+    from . import sessionmem
+    name = (args.get("name") or "").strip()
+    if not ctx.session_id:
+        return "нотатки недоступні: немає активної сесії"
+    text = sessionmem.read_note(ctx.session_id, name) if name else None
+    if text is None:
+        have = ", ".join(s for s, _, _ in sessionmem.list_notes(ctx.session_id)) or "нотаток ще нема"
+        return f"нотатки «{name}» нема. Є: {have}"
+    return text
+
+
 def h_web_search(args, ctx):
     from . import websearch
     res = websearch.search(args.get("query", ""),
@@ -397,6 +422,16 @@ def default_registry() -> ToolRegistry:
                     "тему зі списку доступних тем у контексті.",
                     {"name": {"type": "string", "description": "назва теми"}},
                     ["name"], h_read_topic))
+    r.register(Tool("remember",
+                    "Записати коротку нотатку сесії про те, що ти з'ясував і що знадобиться пізніше (де що лежить, обмеження, "
+                    "рішення). Нотатки не займають контекст — у ньому лише перелік назв. НЕ клади сюди довгі значення "
+                    "(токени, ключі, великі рядки): вкажи файл, звідки їх брати.",
+                    {"name": {"type": "string", "description": "коротка назва"},
+                     "text": {"type": "string", "description": "суть, 1-10 рядків"}},
+                    ["name", "text"], h_remember))
+    r.register(Tool("recall",
+                    "Прочитати нотатку сесії за назвою (перелік є в контексті; назва може бути неповною).",
+                    {"name": {"type": "string"}}, ["name"], h_recall))
     from .subagent import INVESTIGATE_TOOL      # лениво: subagent імпортує toolkit
     r.register(INVESTIGATE_TOOL)
     return r

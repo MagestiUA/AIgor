@@ -21,6 +21,7 @@ from reflex_base.style import set_color_mode
 
 from agent import attachments as A
 from agent import images
+from agent import sessionmem
 from agent import backend as B
 from agent import config
 from agent import convo
@@ -819,6 +820,7 @@ class State(rx.State):
     @rx.event
     def delete_chat(self, sid: str):
         sess.delete_session(sid)
+        sessionmem.clear(sid)
         if self.current_id == sid:
             self._clear_view()
         self.sessions = sess.list_sessions()
@@ -1366,6 +1368,9 @@ class State(rx.State):
             ctx += "\n\n" + pmap
         if self.context_summary:
             ctx += f"\n{convo.as_context(self.context_summary)}"
+        notes = sessionmem.index_block(self.current_id)       # нотатки сесії: лише індекс, зміст — тулом recall
+        if notes:
+            ctx += "\n\n" + notes
         if att_note:
             ctx += "\n" + att_note
         return ctx
@@ -1590,7 +1595,7 @@ class State(rx.State):
                            permissions={"edits": "auto", "shell": self.shell},
                            client=client, confirm=None,
                            attachments_dir=A.session_dir(self.current_id), track_project=True,
-                           extra_roots=[Path(x) for x in self.extra_dirs])
+                           extra_roots=[Path(x) for x in self.extra_dirs], session_id=self.current_id)
 
     async def _dispatch_tool(self, reg, name: str, args: dict, ctx: ToolContext) -> str:
         """Виконати тул + показати подію в живій стрічці («що виконує і який результат»)."""

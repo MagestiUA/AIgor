@@ -38,7 +38,7 @@ def compact_tool_results(messages: list[dict], keep_last: int = COMPACT_KEEP, he
     return n
 
 
-READ_ONLY_TOOLS = ("list_dir", "read_file", "read_attachment", "web_search", "project_note", "investigate")
+READ_ONLY_TOOLS = ("list_dir", "read_file", "read_attachment", "web_search", "project_note", "investigate", "recall", "remember")
 READ_WARN = 8              # стільки читань ПІДРЯД (без жодної зміни/команди) → просимо дати висновок
 READ_FORCE = 12            # ... а стільки → примусовий висновок без тулів
 FINALIZE_TEXT = (
@@ -116,6 +116,9 @@ def research_report(step_text: str, context: str, ctx, registry) -> str:
     except Exception as e:
         logs.get("agent").warning("авто-делегування субагенту не вдалось: %s", e)
         return ""
+    if getattr(ctx, "session_id", ""):                  # звіт — у нотатки сесії: наступні кроки не досліджують те саме вдруге
+        from . import sessionmem
+        sessionmem.save_note(ctx.session_id, "дослідження: " + step_text[:50], rep)
     return ("\n\nЗВІТ СУБАГЕНТА-ДОСЛІДНИКА (він уже прочитав потрібні файли; довіряй йому й НЕ перечитуй ті самі "
             "файли — відповідай на крок за цим звітом, читай лише точкові рядки, якщо чогось справді бракує):\n" + rep)
 
@@ -149,6 +152,8 @@ SYSTEM = (
     "remote commands as one quoted string, use ssh -o BatchMode=yes, and never run endless "
     "commands (adb logcat without -d, tail -f).\n"
     "- web_search(query): look up docs, errors, external info.\n"
+    "- remember(name, text) / recall(name): short session notes on disk (the list of names is in your context); save "
+    "findings you will need later instead of re-reading files. Never put long values (tokens, keys) in notes.\n"
     "- investigate(task): delegate READ-ONLY research (many files, logs, unfamiliar code) to a sub-agent with its "
     "own clean context; you get back only a short conclusion. Use it BEFORE editing when understanding needs "
     "reading more than ~3 files. It changes nothing - you do the edits.\n"
