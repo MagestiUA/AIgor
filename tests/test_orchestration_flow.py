@@ -9,7 +9,7 @@ import tempfile
 import types
 from pathlib import Path
 
-import lca_web.lca_web as W
+import lca_web.state as W
 from agent import limits, projectmap
 from agent.agent_loop import ITER_LIMIT_MSG
 from agent.memory import TaskState

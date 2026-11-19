@@ -8,7 +8,7 @@ from pathlib import Path
 
 from PIL import Image
 
-import lca_web.lca_web as W
+import lca_web.state as W
 from agent import attachments as A
 from agent import images as I
 from agent import llm, llm_openai

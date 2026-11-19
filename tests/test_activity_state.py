@@ -1,5 +1,5 @@
 """Жива стрічка подій у State: старт -> завершення, статуси, обмеження довжини, час останньої події."""
-import lca_web.lca_web as W
+import lca_web.state as W
 
 
 def main() -> None:

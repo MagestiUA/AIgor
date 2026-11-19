@@ -4,7 +4,7 @@ import asyncio
 import types
 from pathlib import Path
 
-import lca_web.lca_web as W
+import lca_web.state as W
 from agent import limits
 
 limits.FORCE = limits.REMOTE                      # hard_iters задано → без виклику моделі для оцінки ітерацій

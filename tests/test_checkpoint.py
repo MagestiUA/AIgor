@@ -2,7 +2,7 @@
 import asyncio
 import types
 
-import lca_web.lca_web as W
+import lca_web.state as W
 from agent import limits
 from agent.agent_loop import CHECKPOINT_EVERY, is_incomplete
 from agent.stepreview import Decision, build_review_prompt

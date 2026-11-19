@@ -5,7 +5,7 @@ import json
 import os
 import types
 
-import lca_web.lca_web as W
+import lca_web.state as W
 from agent import backend, config, gpumon
 
 OK = {"state": "ok", "msg": "", "ms": 120, "gpu_name": "H100", "util": 55.0, "vram_pct": 90.0, "vram_used_mb": 73728,

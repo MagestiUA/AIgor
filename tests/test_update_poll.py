@@ -3,7 +3,7 @@
 import asyncio
 import types
 
-import lca_web.lca_web as W
+import lca_web.state as W
 from agent import updater
 
 

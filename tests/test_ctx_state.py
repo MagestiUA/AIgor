@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 
 from agent import limits, topics
-import lca_web.lca_web as W
+import lca_web.state as W
 
 limits.FORCE = limits.REMOTE
 
