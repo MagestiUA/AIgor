@@ -392,4 +392,6 @@ def default_registry() -> ToolRegistry:
                     "тему зі списку доступних тем у контексті.",
                     {"name": {"type": "string", "description": "назва теми"}},
                     ["name"], h_read_topic))
+    from .subagent import INVESTIGATE_TOOL      # лениво: subagent імпортує toolkit
+    r.register(INVESTIGATE_TOOL)
     return r
