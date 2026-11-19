@@ -164,6 +164,44 @@ _DISCUSS_MARKERS = ("просто питання", "лише питання", "�
                     "just a question", "don't code", "do not code", "no code yet", "just asking")
 
 
+# Дієслова зміни/запуску: крок, де вони є, НЕ «тривіальний» і не суто дослідницький.
+CHANGE_RE = re.compile(
+    r"\b(виправ\w*|зміни|змінити|додай|додати|створи|створити|напиши|написати|видали|видалити|замін\w+|"
+    r"реалізуй|онови|оновити|перейменуй|запусти|встанови|імпортуй|імпортув\w+|вставити|вставь|прибери|прибрати|"
+    r"перепиши|переписати|fix|edit|create|write|implement|add|remove|run|install|delete|rename|import)\b", re.I)
+
+
+def wants_change(text: str) -> bool:
+    return bool(CHANGE_RE.search(text or ""))
+
+
+# ── режим «правки: auto» — Ігорь діє самостійно ───────────────────────────────
+_ERR_MARKERS = re.compile(
+    r"Traceback \(most recent call last\)|\b[A-Z][A-Za-z]*(?:Error|Exception)\b|\bFAILED\b|npm ERR!|error TS\d+|"
+    r"\bCannot find module\b|\bSegmentation fault\b|\bpanic:|File \"[^\"]+\", line \d+|"
+    r"^\s*at \S+ ?\(.*:\d+|\bE/AndroidRuntime\b|\bFATAL EXCEPTION\b", re.MULTILINE)
+
+
+def looks_like_error_log(text: str) -> bool:
+    """Чи повідомлення схоже на лог помилки/трасування (Traceback, XxxError, FAILED, стек викликів…)."""
+    t = text or ""
+    return len(_ERR_MARKERS.findall(t)) >= 1 and (len(t.splitlines()) >= 3 or len(t) > 200)
+
+
+def explicit_no_change(text: str) -> bool:
+    """Користувач прямо просить НЕ змінювати код (лише обговорення)."""
+    low = (text or "").lower()
+    return any(m in low for m in _DISCUSS_MARKERS) or any(m in low for m in ("не змінюй", "не виправляй", "лише поясни", "тільки поясни"))
+
+
+AUTONOMY_NOTE = (
+    "РЕЖИМ САМОСТІЙНИХ ПРАВОК (правки: auto). Користувач дозволив вносити зміни без підтвердження й очікує РЕЗУЛЬТАТ, а не "
+    "опис. Якщо повідомлення — лог помилки, повідомлення про збій чи «що не так / чому не працює»: з'ясуй причину, ВИПРАВ її "
+    "(правка файлів), а потім перевір виправлення (запусти тест або команду, якщо є) і коротко звітуй, що змінено. Не "
+    "зупиняйся на поясненні причини й не питай дозволу на очевидне виправлення. Лише якщо потрібен вибір, який може зробити "
+    "лише користувач, — запитай.")
+
+
 def wants_discussion(text: str) -> bool:
     """Питання про можливість/пояснення АБО явне «просто обговорюємо, не пиши код»."""
     low = (text or "").lower()

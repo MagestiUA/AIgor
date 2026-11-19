@@ -1418,6 +1418,8 @@ class State(rx.State):
         ctx = (f"Project root: {root}\n{self._roots_note()}\nЗагальна задача: {plan.task}\n"
                f"План і результати вже виконаних кроків (ти виконуєш ЛИШЕ крок #{step.id}):\n"
                f"{render_for_planner(plan)}")
+        if self.edits == "auto":                          # режим самостійних правок: виправляй, а не лише описуй
+            ctx = orch.AUTONOMY_NOTE + "\n\n" + ctx
         pmap = projectmap.context_block(root)             # свіжа: попередній крок міг змінити файли
         if pmap:
             ctx += "\n\n" + pmap
@@ -2424,6 +2426,7 @@ class State(rx.State):
             root = self.project_root
             refs = [str(x) for x in self.references]
             plan_first = self.plan_first or self.edits == "ask"
+            autonomous = self.edits == "auto"          # режим самостійних правок: лог помилки = виправляти
             summary = self.context_summary
             att_note = self._attachments_note()     # шляхи прикріплених файлів (модель читає сама)
             last_ai = orch.last_assistant_text(self.messages)      # ПОВНА попередня відповідь (не підсумок)
@@ -2456,7 +2459,8 @@ class State(rx.State):
             else:
                 task_text = text
                 mode = await asyncio.to_thread(
-                    lambda: classify_intent(text, client, context=orch.context_for_intent(last_ai)))
+                    lambda: classify_intent(text, client, context=orch.context_for_intent(last_ai),
+                                            autonomous=autonomous, has_attachments=bool(att_note)))
             if mode == "answer":
                 async with self:
                     self.status = "Аналізую код…"
@@ -2481,7 +2485,8 @@ class State(rx.State):
                 doc = await asyncio.to_thread(lambda: load_project_doc(root))
                 struct = await asyncio.to_thread(lambda: scan_structure(root))
                 su2, so = await self._deliberate_flow(
-                    task_text, convo.as_context(summary) + dialogue + pmap + struct, doc, [], root, plan_first, client)
+                    task_text, (orch.AUTONOMY_NOTE + "\n\n" if autonomous else "") + convo.as_context(summary) + dialogue
+                    + pmap + struct, doc, [], root, plan_first, client)
                 su = su2 if not approved else su
 
         if (so or "").strip():

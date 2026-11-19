@@ -13,6 +13,7 @@ from . import config
 from . import limits
 from . import logs
 from .literals import mask_long
+from .orchestration import CHANGE_RE
 from .shell_guard import is_read_command
 from .loopguard import (CHECKPOINT_PREFIX, CONTEXT_FULL_PREFIX, STUCK_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from .llm import OllamaClient
@@ -164,9 +165,7 @@ def finalize(messages: list[dict], client) -> str:
 
 _RESEARCH = re.compile(r"\b(знайди|з'ясуй|дізнайся|досліди|дослідж\w*|проаналізуй|огляни|переглянь|поясни|"
                        r"як працює|де в проєкті|де знаходиться|find|investigate|explore|analy[sz]e|explain)\b", re.I)
-_CHANGE = re.compile(r"\b(виправ\w*|зміни|змінити|додай|додати|створи|створити|напиши|написати|видали|видалити|замін\w+|"
-                     r"реалізуй|онови|оновити|перейменуй|запусти|встанови|fix|edit|create|write|implement|add|remove|"
-                     r"run|install|delete|rename)\b", re.I)
+_CHANGE = CHANGE_RE            # дієслова зміни/запуску (agent/orchestration.py)
 
 
 _QUESTION = re.compile(r"^\s*(як|де|чому|що|яким|які|яка|який|куди|звідки|how|where|why|what)\b", re.I)

@@ -30,8 +30,10 @@ class Step:
     def is_noop(self) -> bool:
         """`inline` без файлу-цілі — справді тривіальний крок, нічого виконувати. Якщо ж у inline-кроку
         є target, планувальник помилково назвав правку файлу «тривіальною» — виконуємо як `llm`
-        (інакше крок мовчки помічався б виконаним, а файл лишався незмінним)."""
-        return self.kind == "inline" and not (self.target or "").strip()
+        (інакше крок мовчки помічався б виконаним, а файл лишався незмінним). Так само, якщо в описі є дієслово зміни
+        («додати імпорт…», «виправити…»): модель інколи позначає реальну правку як inline без цілі — виконуємо."""
+        from .orchestration import wants_change
+        return self.kind == "inline" and not (self.target or "").strip() and not wants_change(self.description)
 
 
 @dataclass

@@ -24,6 +24,7 @@ class FakeState:
         self.current_id = "sid-test"
         self.status = ""
         self.context_summary = ""
+        self.edits = "ask"             # режим правок (auto додає нотатку автономності в контекст кроку)
         self.notes: list[str] = []
         self.pending_saved = None
         self.has_pending = False
@@ -119,6 +120,13 @@ def _main() -> None:
     out = run(st, plan)
     assert [s.status for s in plan.steps] == ["done"] * 3 and len(st.run_log) == 3, st.run_log
     assert "результат" in st.step_contexts[1] or "готово 1" in st.step_contexts[1], st.step_contexts[1]
+    assert "САМОСТІЙНИХ ПРАВОК" not in st.step_contexts[1]                         # режим ask — без нотатки автономності
+    # режим «правки: auto»: у контексті кроку з'являється вказівка діяти самостійно (виправляти, а не лише описувати)
+    st_auto = FakeState(root, ok_script)
+    st_auto.edits = "auto"
+    p_auto = make_plan(2)
+    run(st_auto, p_auto)
+    assert all("САМОСТІЙНИХ ПРАВОК" in c and "ВИПРАВ" in c for c in st_auto.step_contexts), st_auto.step_contexts[0][:200]
     assert "готово 1" in st.step_contexts[2] and "готово 2" in st.step_contexts[2]       # крок 3 бачить кроки 1–2
     assert "mod1.py" in st.step_contexts[2] and "mod2.py" in st.step_contexts[2]         # …і змінені файли
     assert any("Звірка пройшла" in n for n in st.notes) and st.notes[-1] == "Готово ✓"

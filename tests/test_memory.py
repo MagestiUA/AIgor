@@ -39,6 +39,12 @@ def main() -> None:
     assert "    - перше" in ui and "    - друге" in ui and "    - третє" in ui, ui
     assert "\n\n" in ui                                  # порожні рядки між пунктами — інакше markdown склеїть
 
+    # inline без цілі — тривіальний (нічого виконувати), АЛЕ якщо в описі дієслово зміни — це реальна правка, виконуємо
+    from agent.memory import Step
+    assert Step(1, "inline", "Подумати над назвою").is_noop
+    assert not Step(1, "inline", "Додати імпорт mask_long на початку sessionmem.py").is_noop
+    assert not Step(1, "inline", "Виправити помилку у функції").is_noop and not Step(1, "inline", "x", target="a.py").is_noop
+    assert not Step(1, "llm", "Подумати над назвою").is_noop
     print("OK: стан задачі зберігається/завантажується, рендер компактний\n")
     print(rendered)
 

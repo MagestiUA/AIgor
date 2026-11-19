@@ -10,7 +10,7 @@ import json
 
 from . import config
 from .llm import OllamaClient
-from .orchestration import wants_discussion
+from .orchestration import explicit_no_change, looks_like_error_log, wants_discussion
 
 MODES = {"edit", "answer", "shell", "plan"}
 
@@ -35,15 +35,30 @@ SCHEMA = {
 }
 
 
-def classify_intent(task: str, client: OllamaClient | None = None, context: str = "") -> str:
+AUTONOMY_RULE = (
+    "\nAUTONOMOUS MODE is ON (the user allowed edits without confirmation): the user expects problems to be FIXED, "
+    "not just explained. If the message reports a problem (an error log, traceback, failing behavior, 'what is wrong?', "
+    "'why does it not work?', attached log files), classify it as 'edit'. Use 'answer' only for neutral explanations "
+    "('how does X work?') where nothing is reported as broken."
+)
+
+
+def classify_intent(task: str, client: OllamaClient | None = None, context: str = "", autonomous: bool = False,
+                    has_attachments: bool = False) -> str:
     """context — що було перед повідомленням (остання відповідь асистента): без нього коротке
-    «роби» класифікується навмання (фідбек розробників)."""
-    if wants_discussion(task):                    # питання про можливість/«просто питання» — обговорення, без виклику моделі
+    «роби» класифікується навмання (фідбек розробників).
+    autonomous — режим правок «auto»: лог помилки/повідомлення про збій = виправляти, а не лише пояснювати."""
+    if autonomous and looks_like_error_log(task) and not explicit_no_change(task):
+        return "edit"                             # лог помилки в режимі auto — виправляємо, без виклику моделі
+    # питання про можливість/«просто питання» — обговорення, без виклику моделі (в auto з прикріпленим логом — питаємо модель)
+    if wants_discussion(task) and not (autonomous and has_attachments and not explicit_no_change(task)):
         return "answer"
     client = client or OllamaClient()
     user = (context + "\n\nПовідомлення користувача:\n" if context else "") + task
+    if has_attachments:
+        user += "\n\n[До повідомлення прикріплено файли — можливо логи.]"
     msg = client.chat(
-        [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}],
+        [{"role": "system", "content": SYSTEM + (AUTONOMY_RULE if autonomous else "")}, {"role": "user", "content": user}],
         profile=config.EXECUTOR, fmt=SCHEMA,
     )
     try:
