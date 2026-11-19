@@ -14,6 +14,7 @@ from __future__ import annotations
 import re
 
 from . import config, limits, logs
+from .literals import mask_long
 from .loopguard import LoopGuard
 from .toolkit import Tool, ToolContext, ToolRegistry, default_registry
 
@@ -31,10 +32,6 @@ SYSTEM = (
     "Answer in the language of the task. When you have enough, stop calling tools and give the conclusion."
 )
 
-# довгі «токеноподібні» значення у висновку замінюємо на посилання, щоб не роздувати контекст і не псувати їх переказом
-_LONG_TOKEN = re.compile(r"[A-Za-z0-9+/=_\-]{80,}")
-
-
 def readonly_registry() -> ToolRegistry:
     full = default_registry()
     r = ToolRegistry()
@@ -46,7 +43,7 @@ def readonly_registry() -> ToolRegistry:
 
 
 def _clip_report(text: str) -> str:
-    t = _LONG_TOKEN.sub(lambda m: f"<довге значення {len(m.group(0))} симв. — див. джерело>", (text or "").strip())
+    t = mask_long((text or "").strip())      # довгі значення — посиланням: не роздувають контекст і не псуються переказом
     if len(t) > REPORT_MAX:
         t = t[:REPORT_MAX] + f"\n…[висновок скорочено, було {len(t)} символів]"
     return t

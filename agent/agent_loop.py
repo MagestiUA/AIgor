@@ -12,6 +12,7 @@ import re
 from . import config
 from . import limits
 from . import logs
+from .literals import mask_long
 from .loopguard import (CHECKPOINT_PREFIX, CONTEXT_FULL_PREFIX, STUCK_PREFIX, WARN_TEXT, LoopGuard, context_full)
 from .llm import OllamaClient
 from .toolkit import ToolContext, ToolRegistry, default_registry
@@ -51,7 +52,6 @@ SUMMARY_SYSTEM = (
     "__LIT_3__ EXACTLY as written. No preamble, no tool calls."
 )
 _PLACEHOLDER = re.compile(r"__LIT_\d+__")
-_LONGVAL = re.compile(r"[A-Za-z0-9+/=_\-]{80,}")
 
 
 def _transcript(middle: list[dict], cap: int) -> str:
@@ -71,7 +71,7 @@ def _transcript(middle: list[dict], cap: int) -> str:
             lines.append("MODEL " + c[:300])
         else:
             lines.append("USER " + c[:500])
-    text = _LONGVAL.sub(lambda mt: f"<довге значення {len(mt.group(0))} симв.>", "\n".join(lines))
+    text = mask_long("\n".join(lines), hint=False)
     return text if len(text) <= cap else text[:cap // 2] + "\n…\n" + text[-cap // 2:]
 
 
@@ -100,7 +100,7 @@ def summarize_history(messages: list[dict], client, window: int = 0, keep_last: 
         return False, 0, 0
     if not out:
         return False, 0, 0
-    out = _LONGVAL.sub(lambda mt: f"<довге значення {len(mt.group(0))} симв.>", out)[:SUMMARY_MAX]
+    out = mask_long(out, hint=False)[:SUMMARY_MAX]
     lost = [p for p in dict.fromkeys(_PLACEHOLDER.findall(" ".join(str(m.get("content") or "") for m in middle)))
             if p not in out]
     if lost:

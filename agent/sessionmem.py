@@ -16,14 +16,13 @@ import shutil
 import time
 from pathlib import Path
 
+from .literals import mask_long
+
 ROOT = Path.home() / ".local-code-agent" / "session-memory"
 MAX_NOTES = 40            # на сесію (старіші витісняються)
 NOTE_CHARS = 6000         # розмір однієї нотатки
 INDEX_CHARS = 900         # бюджет індексу в контексті
 GIST = 110                # довжина «суті» одного рядка індексу
-
-_LONG = re.compile(r"[A-Za-z0-9+/=_\-]{80,}")
-
 
 def _dir(sid: str) -> Path:
     return ROOT / re.sub(r"[^A-Za-z0-9_-]+", "_", sid or "")
@@ -35,7 +34,7 @@ def _slug(name: str) -> str:
 
 
 def _clean(text: str) -> str:
-    return _LONG.sub(lambda m: f"<довге значення {len(m.group(0))} симв. — див. джерело>", (text or "").strip())[:NOTE_CHARS]
+    return mask_long((text or "").strip())[:NOTE_CHARS]
 
 
 def save_note(sid: str, name: str, text: str) -> str:

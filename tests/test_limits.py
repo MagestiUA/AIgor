@@ -13,6 +13,10 @@ def main() -> None:
     assert limits.get({"llm_backend": "ollama", "llm_context": "abc"}).context_tokens == config.LOCAL_CTX
     assert limits.get({"llm_backend": "openai"}) is limits.REMOTE
     assert limits.get({"llm_backend": "openai", "llm_context": "32768"}).context_tokens == 32768
+    # «милиці» слабкої моделі — лише за налаштуванням (за замовчуванням вимкнено і локально, і на сервері)
+    assert not limits.get({"llm_backend": "ollama"}).weak_model_fixes and not limits.get({"llm_backend": "openai"}).weak_model_fixes
+    assert limits.get({"llm_backend": "ollama", "weak_model_fixes": True}).weak_model_fixes
+    assert limits.get({"llm_backend": "openai", "weak_model_fixes": True}).weak_model_fixes
     r, l = limits.REMOTE, limits.LOCAL
     assert r.chunk > l.chunk and r.inline > l.inline and r.summary > l.summary
     assert r.history_msgs > l.history_msgs and r.file_chars > l.file_chars

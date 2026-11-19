@@ -63,6 +63,8 @@ def scaled(base: Limits, window: int) -> Limits:
 
 
 def get(settings: dict | None = None) -> Limits:
+    """Ефективний набір бюджетів: FORCE (тести) > налаштування. Локально й на сервері — одні «серверні» правила;
+    вікно можна перевизначити (llm_context), а «милиці» слабкої моделі вмикаються налаштуванням weak_model_fixes."""
     if FORCE is not None:
         return FORCE
     from . import backend
@@ -75,5 +77,10 @@ def get(settings: dict | None = None) -> Limits:
     if backend.resolve(s)["backend"] != "openai":
         from . import config
         # локальний режим: ті самі «серверні» правила, але бюджети (ліміти перед стисненням тощо) під обране вікно
-        return scaled(REMOTE, win if win >= 2048 else config.LOCAL_CTX)
-    return scaled(REMOTE, win) if 2048 <= win < REMOTE.context_tokens else REMOTE
+        lim = scaled(REMOTE, win if win >= 2048 else config.LOCAL_CTX)
+    else:
+        lim = scaled(REMOTE, win) if 2048 <= win < REMOTE.context_tokens else REMOTE
+    if s.get("weak_model_fixes") and not lim.weak_model_fixes:
+        from dataclasses import replace
+        lim = replace(lim, weak_model_fixes=True)
+    return lim
