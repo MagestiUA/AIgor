@@ -38,6 +38,79 @@ def compact_tool_results(messages: list[dict], keep_last: int = COMPACT_KEEP, he
     return n
 
 
+SUMMARIZE_RATIO = 0.75     # з якої частки вікна стискаємо історію кроку підсумком від моделі
+SUMMARIZE_KEEP = 6         # скільки останніх повідомлень лишаємо дослівно
+SUMMARIZE_MIN_MIDDLE = 4   # менше повідомлень у «середині» — не варто викликати модель
+SUMMARY_MAX = 2200         # довжина підсумку (символів)
+SUMMARY_SYSTEM = (
+    "You compress the working history of ONE step of a coding agent so it can continue with a smaller context. "
+    "Write a compact summary (max ~1500 characters) in the language of the task: (1) what was DONE (commands run and "
+    "their key results, files read/changed), (2) FACTS found that matter (exact file paths, function/class names, "
+    "values, errors), (3) what is still TO DO. Keep exact paths, names, numbers and error texts. NEVER retell long "
+    "values (tokens, keys, base64, big strings, data) - mention only where they live. Keep every placeholder like "
+    "__LIT_3__ EXACTLY as written. No preamble, no tool calls."
+)
+_PLACEHOLDER = re.compile(r"__LIT_\d+__")
+_LONGVAL = re.compile(r"[A-Za-z0-9+/=_\-]{80,}")
+
+
+def _transcript(middle: list[dict], cap: int) -> str:
+    """Текстовий запис середини історії для моделі-стискача: дії коротко, результати з початком і кінцем,
+    довгі значення замінені посиланням (щоб модель не «переказала» їх з помилками)."""
+    lines = []
+    for m in middle:
+        role, c = m.get("role"), m.get("content") or ""
+        if role == "assistant" and m.get("tool_calls"):
+            for tc in m["tool_calls"]:
+                f = tc.get("function", {})
+                lines.append(f"ACTION {f.get('name')}({json.dumps(f.get('arguments', {}), ensure_ascii=False)[:220]})")
+        elif role == "tool":
+            t = c if len(c) <= 700 else c[:450] + " … " + c[-200:]
+            lines.append("RESULT " + t.replace("\n", " ⏎ "))
+        elif role == "assistant":
+            lines.append("MODEL " + c[:300])
+        else:
+            lines.append("USER " + c[:500])
+    text = _LONGVAL.sub(lambda mt: f"<довге значення {len(mt.group(0))} симв.>", "\n".join(lines))
+    return text if len(text) <= cap else text[:cap // 2] + "\n…\n" + text[-cap // 2:]
+
+
+def summarize_history(messages: list[dict], client, window: int = 0, keep_last: int = SUMMARIZE_KEEP) -> tuple[bool, int, int]:
+    """Стиснути СЕРЕДИНУ історії кроку підсумком від моделі (на місці). Лишаємо: system, перше user-повідомлення
+    (завдання + контекст кроку + картинки), останні keep_last повідомлень. Хвіст починаємо не з tool-повідомлення, щоб
+    не розірвати пару «виклик → результат». Плейсхолдери літералів (__LIT_N__) з середини мусять дожити до підсумку
+    дослівно — якщо модель їх загубила, дописуємо. Збій/порожній підсумок → нічого не змінюємо.
+    -> (стиснуто?, символів до, символів після)."""
+    n = len(messages)
+    cut = n - keep_last
+    while cut > 2 and messages[cut].get("role") == "tool":
+        cut -= 1
+    middle = messages[2:cut]
+    if cut <= 2 or len(middle) < SUMMARIZE_MIN_MIDDLE:
+        return False, 0, 0
+    before = sum(len(m.get("content") or "") for m in middle)
+    cap = min(30000, int(window * 0.4 * 2.6)) if window else 30000          # сам запит стискача мусить вміщатись у вікно
+    try:
+        out = (client.chat([{"role": "system", "content": SUMMARY_SYSTEM},
+                            {"role": "user", "content": "TASK OF THE STEP:\n" + str(messages[1].get("content") or "")[:1500]
+                                                        + "\n\nHISTORY TO COMPRESS:\n" + _transcript(middle, cap)}],
+                           profile=config.EXECUTOR).get("content") or "").strip()
+    except Exception as e:
+        logs.get("agent").warning("стиснення історії кроку підсумком не вдалось: %s", e)
+        return False, 0, 0
+    if not out:
+        return False, 0, 0
+    out = _LONGVAL.sub(lambda mt: f"<довге значення {len(mt.group(0))} симв.>", out)[:SUMMARY_MAX]
+    lost = [p for p in dict.fromkeys(_PLACEHOLDER.findall(" ".join(str(m.get("content") or "") for m in middle)))
+            if p not in out]
+    if lost:
+        out += "\nПлейсхолдери літералів, що використовувались: " + ", ".join(lost)
+    messages[2:cut] = [{"role": "user", "content":
+                        "ПІДСУМОК попередніх дій цього кроку (історію стиснуто; факти нижче вже встановлені — "
+                        "не перевіряй їх повторно):\n" + out}]
+    return True, before, len(out)
+
+
 READ_ONLY_TOOLS = ("list_dir", "read_file", "read_attachment", "web_search", "project_note", "investigate", "recall", "remember")
 READ_WARN = 8              # стільки читань ПІДРЯД (без жодної зміни/команди) → просимо дати висновок
 READ_FORCE = 12            # ... а стільки → примусовий висновок без тулів
@@ -484,7 +557,14 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
         ls = getattr(client, "last_stats", None) or {}
         win = limits.get().context_tokens
         if ls and win and ls.get("prompt", 0) >= COMPACT_RATIO * win:
-            freed = compact_tool_results(messages)
+            freed = compact_tool_results(messages)               # дешево: обрізаємо старі результати тулів
+            if ls.get("prompt", 0) >= SUMMARIZE_RATIO * win:     # не вистачило — підсумок від моделі замість середини історії
+                done, b4, af = summarize_history(messages, client, win)
+                if done:
+                    logs.get("agent").info("історію кроку стиснуто підсумком: %d → %d символів", b4, af)
+                    if on_tool:
+                        on_tool("compress", {}, f"історію кроку стиснуто підсумком: {b4} → {af} символів")
+                    continue
             if freed and context_full(ls.get("prompt", 0), win):
                 continue                                  # стиснули — даємо кроку шанс завершитись
         if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):

@@ -1634,7 +1634,8 @@ class State(rx.State):
         не з відірваної корутини. Додає ОДНЕ повідомлення-крок із катом «хід виконання».
         Логіку дублюємо з agent_loop.run_step (той лишається для headless/тестів)."""
         from agent.agent_loop import (SYSTEM as EXEC_SYSTEM, _args, COMPACT_RATIO, CHECKPOINT_EVERY, compact_tool_results,
-                                      ReadStreak, READ_NUDGE, finalize, is_research_step, research_report)
+                                      ReadStreak, READ_NUDGE, finalize, is_research_step, research_report,
+                                      SUMMARIZE_RATIO, summarize_history)
         reg = default_registry()
         client = ctx.client
         user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
@@ -1752,6 +1753,19 @@ class State(rx.State):
             win = limits.get().context_tokens
             if ls and win and ls.get("prompt", 0) >= COMPACT_RATIO * win:
                 freed = compact_tool_results(messages)
+                if ls.get("prompt", 0) >= SUMMARIZE_RATIO * win:        # не вистачило — підсумок від моделі
+                    async with self:
+                        aid_sum = self._act_start("llm", "Стиснення контексту", "підсумок історії кроку від моделі")
+                    t_sum = time.monotonic()
+                    done, b4, af = await asyncio.to_thread(summarize_history, messages, client, win)
+                    async with self:
+                        self._act_done(aid_sum, f"{time.monotonic() - t_sum:.1f}с · " +
+                                       (f"{b4} → {af} символів" if done else "пропущено"), ok=done)
+                        if done:
+                            self._append("assistant", f"🗜 Історію кроку стиснуто підсумком від моделі: {b4} → {af} символів "
+                                                      "(контекст кроку наближався до межі).", "note")
+                    if done:
+                        continue
                 if freed and context_full(ls.get("prompt", 0), win):
                     continue                              # стиснули старі результати — крок може завершитись
             if ls and context_full(ls.get("prompt", 0), limits.get().context_tokens):
