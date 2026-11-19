@@ -40,7 +40,7 @@ from agent.agent_loop import (ITER_LIMIT_MSG, is_incomplete, _estimate_iters, NU
                               _looks_like_leaked_reasoning,
                               extract_intended_attachments)
 from agent.answerer import build_context
-from agent.hierarchical import check_consistency
+from agent.stepreview import check_consistency
 from agent import stepreview as review
 from agent.intent import classify_intent
 from agent.llm import OllamaClient
@@ -1549,7 +1549,7 @@ class State(rx.State):
 
     async def _verify_plan(self, plan, root: str, client, ctx, touched_by_step: dict, stop_ev, att_note: str) -> str:
         """Звірка після всіх кроків: (1) змінені .py компілюються; (2) LLM-перевірка узгодженості
-        кроків (hierarchical.check_consistency). Проблему виправляємо ПОВТОРОМ одного кроку з
+        кроків (stepreview.check_consistency). Проблему виправляємо ПОВТОРОМ одного кроку з
         уточненням — не більше 2 раундів, щоб не крутитись. Повертає рядок для підсумку."""
         def all_files() -> list[str]:
             return list(dict.fromkeys(f for fl in touched_by_step.values() for f in fl))

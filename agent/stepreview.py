@@ -17,6 +17,7 @@ import re
 from dataclasses import dataclass, field
 
 from . import config
+from .memory import render_for_planner
 
 REPORT_MAX = 2400            # загальний ліміт звіту про один крок (символів)
 OUT_HEAD, OUT_TAIL = 500, 300   # скільки початку/кінця виводу команди лишаємо
@@ -171,3 +172,41 @@ def apply_decision(plan, dec: Decision, current_id: int, allow_change: bool) -> 
         plan.add_step("llm", text)
         changed = True
     return changed
+
+
+# ── Звірка узгодженості виконаного плану (після всіх кроків) ───────────────────
+CONSISTENCY_SYSTEM = (
+    "You review an executed plan (compact slice: steps, statuses, short results). Decide "
+    "if all steps are mutually consistent and the task is complete. Reply ONLY as JSON: "
+    "{\"ok\": true} if consistent; otherwise {\"ok\": false, \"step_id\": N, \"note\": "
+    "\"what to fix\"} naming ONE step to redo with a short clarification (user's language). "
+    "Be conservative: report a problem ONLY if a step clearly failed or two steps contradict "
+    "each other; do not ask to redo a step just to polish it."
+)
+
+CONSISTENCY_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "ok": {"type": "boolean"},
+        "step_id": {"type": ["integer", "null"]},
+        "note": {"type": ["string", "null"]},
+    },
+    "required": ["ok"],
+}
+
+
+def check_consistency(state, client) -> dict:
+    """Звірити узгодженість виконаного плану. -> {ok, step_id, note}."""
+    msg = client.chat(
+        [{"role": "system", "content": CONSISTENCY_SYSTEM},
+         {"role": "user", "content": render_for_planner(state)}],
+        profile=config.EXECUTOR, fmt=CONSISTENCY_SCHEMA,
+    )
+    try:
+        d = json.loads(msg.get("content") or "")
+        if isinstance(d, dict):
+            return {"ok": bool(d.get("ok")), "step_id": d.get("step_id"),
+                    "note": str(d.get("note") or "")}
+    except Exception:
+        pass
+    return {"ok": True, "step_id": None, "note": ""}          # не змогли розпарсити -> не зациклюємось

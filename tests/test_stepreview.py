@@ -80,6 +80,22 @@ def main() -> None:
     for st in old["steps"]:
         st.pop("report")                                                    # сесії старого формату
     assert state_from_dict(old).steps[1].report == ""
+    # звірка узгодженості плану (перенесена з прототипу hierarchical): ok / вказаний крок / зіпсований JSON → не зациклюємось
+    from agent.stepreview import check_consistency
+    from agent.memory import TaskState
+
+    class Cl:
+        def __init__(self, c):
+            self.c = c
+
+        def chat(self, messages, tools=None, profile=None, fmt=None):
+            return {"content": self.c}
+    st = TaskState(task="t")
+    st.add_step("llm", "a")
+    assert check_consistency(st, Cl('{"ok": true}')) == {"ok": True, "step_id": None, "note": ""}
+    r = check_consistency(st, Cl('{"ok": false, "step_id": 2, "note": "перероби"}'))
+    assert r == {"ok": False, "step_id": 2, "note": "перероби"}
+    assert check_consistency(st, Cl("не json"))["ok"] is True
     print("OK: stepreview — точні факти команд, парсинг/застосування рішень, збереження звіту")
 
 
