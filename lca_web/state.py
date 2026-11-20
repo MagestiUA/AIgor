@@ -248,7 +248,8 @@ GPU_JS = r"""
 """
 STREAM_THINK_TAIL = 3000                    # скільки символів живих роздумів показуємо під час стріму
 STREAM_FLUSH_S = 0.2                       # як часто (с) оновлювати стрім відповіді/роздумів у UI
-INPUT_ID = "task-input"                    # поле вводу повідомлення (некероване)
+SHOWN_STEP = 40                            # порція повідомлень історії, що рендериться (і підвантажується кнопкою)
+INPUT_ID = "task-input"                   # поле вводу повідомлення (некероване)
 CLEAR_INPUT_JS = (f"(function(){{var e=document.getElementById('{INPUT_ID}');"
                   "if(e){e.value='';e.style.height='';}})()")
 
@@ -337,6 +338,7 @@ class State(rx.State):
     ref_input: str = ""
     task: str = ""
     messages: list[dict] = []
+    shown_count: int = 40                  # скільки останніх повідомлень рендеримо (довга історія гальмує відкриття)
     has_pending: bool = False
     queued_text: str = ""                  # повідомлення, що чекає, поки модель зайнята
     stopping: bool = False                 # стоп запитано, чекаємо переривання
@@ -780,6 +782,7 @@ class State(rx.State):
         self.plan_first = s.plan_first
         self.references = list(s.reference_files)
         self.extra_dirs = list(s.extra_dirs)
+        self.shown_count = SHOWN_STEP
         self.messages = [{"thinking": "", "attachments": [], "thumbs": [], **m} for m in s.messages]
         self.has_pending = s.pending_plan is not None
         self.context_summary = s.context_summary
@@ -846,6 +849,19 @@ class State(rx.State):
     @rx.event
     def select_chat(self, sid: str):
         self._select(sid)
+
+    @rx.var
+    def shown_messages(self) -> list[dict]:
+        """Лише останні `shown_count` повідомлень — решта підвантажується кнопкою (клієнт не рендерить усю історію)."""
+        return self.messages[-self.shown_count:] if len(self.messages) > self.shown_count else self.messages
+
+    @rx.var
+    def hidden_count(self) -> int:
+        return max(0, len(self.messages) - self.shown_count)
+
+    @rx.event
+    def show_earlier(self):
+        self.shown_count = self.shown_count + SHOWN_STEP
 
     @rx.event
     def set_rename_input(self, v: str):

@@ -962,7 +962,12 @@ def activity_row_full(r: dict) -> rx.Component:
 
 def chat_view() -> rx.Component:
     return rx.vstack(
-        rx.foreach(State.messages, message_bubble),
+        rx.cond(
+            State.hidden_count > 0,
+            rx.button(rx.text("Показати раніші повідомлення (", State.hidden_count, ")"),
+                      on_click=State.show_earlier, variant="soft", size="1", class_name="self-center shrink-0"),
+            rx.fragment()),
+        rx.foreach(State.shown_messages, message_bubble),
         rx.cond(State.streaming, streaming_bubble(), rx.fragment()),
         status_line(),
         activity_panel(),

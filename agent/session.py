@@ -116,10 +116,21 @@ def list_sessions(base: str | Path | None = None) -> list[dict]:
     out = []
     for p in sorted(_dir(base).glob("*.json"), key=lambda x: x.stat().st_mtime, reverse=True):
         try:
+            st = p.stat()
+            key = (st.st_mtime_ns, st.st_size)
+            hit = _META_CACHE.get(str(p))
+            if hit and hit[0] == key:                     # файл не змінювався — не парсимо велику історію знову
+                out.append(dict(hit[1]))
+                continue
             d = json.loads(p.read_text(encoding="utf-8"))
-            out.append({"id": d["id"], "title": d["title"],
-                        "project_root": d["project_root"], "updated": d.get("updated"),
-                        "kind": d.get("kind", "code"), "project_id": d.get("project_id", "")})
+            meta = {"id": d["id"], "title": d["title"],
+                    "project_root": d["project_root"], "updated": d.get("updated"),
+                    "kind": d.get("kind", "code"), "project_id": d.get("project_id", "")}
+            _META_CACHE[str(p)] = (key, meta)
+            out.append(dict(meta))
         except Exception:
             pass
     return out
+
+
+_META_CACHE: dict[str, tuple] = {}
