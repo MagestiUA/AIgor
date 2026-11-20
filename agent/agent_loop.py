@@ -113,7 +113,7 @@ def summarize_history(messages: list[dict], client, window: int = 0, keep_last: 
     return True, before, len(out)
 
 
-READ_ONLY_TOOLS = ("list_dir", "read_file", "read_attachment", "web_search", "project_note", "investigate", "recall", "remember")
+READ_ONLY_TOOLS = ("list_dir", "read_file", "read_attachment", "web_search", "project_note", "investigate", "recall", "remember", "recall_history")
 READ_WARN = 8              # стільки читань ПІДРЯД (без жодної зміни/команди) → просимо дати висновок
 READ_FORCE = 12            # ... а стільки → примусовий висновок без тулів
 FINALIZE_TEXT = (
@@ -227,6 +227,9 @@ SYSTEM = (
     "- web_search(query): look up docs, errors, external info.\n"
     "- remember(name, text) / recall(name): short session notes on disk (the list of names is in your context); save "
     "findings you will need later instead of re-reading files. Never put long values (tokens, keys) in notes.\n"
+    "- recall_history(query | number): the FULL conversation with the user is stored on disk; the summary in your context is "
+    "lossy. When you need exact details the summary lacks (a command, an error text, what the user asked earlier), "
+    "search it instead of guessing or asking the user again.\n"
     "- investigate(task): delegate READ-ONLY research (many files, logs, unfamiliar code) to a sub-agent with its "
     "own clean context; you get back only a short conclusion. Use it BEFORE editing when understanding needs "
     "reading more than ~3 files. It changes nothing - you do the edits.\n"

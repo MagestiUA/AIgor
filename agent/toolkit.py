@@ -344,6 +344,22 @@ def h_recall(args, ctx):
     return text
 
 
+def h_recall_history(args, ctx):
+    from . import history
+    from . import session as sess
+    if not ctx.session_id:
+        return "історія недоступна: немає активної сесії"
+    try:
+        msgs = sess.load_session(ctx.session_id).messages
+    except (OSError, ValueError, KeyError):
+        return "історія недоступна: сесію не знайдено"
+    try:
+        number = int(args.get("number") or 0)
+    except (TypeError, ValueError):
+        number = 0
+    return history.search(msgs, str(args.get("query") or ""), number or None)
+
+
 def h_web_search(args, ctx):
     from . import websearch
     res = websearch.search(args.get("query", ""),
@@ -432,6 +448,14 @@ def default_registry() -> ToolRegistry:
     r.register(Tool("recall",
                     "Прочитати нотатку сесії за назвою (перелік є в контексті; назва може бути неповною).",
                     {"name": {"type": "string"}}, ["name"], h_recall))
+    r.register(Tool("recall_history",
+                    "Знайти деталі в ПОВНІЙ історії цієї розмови, яку стиснуто в підсумок: точні команди, тексти помилок, "
+                    "що саме просив користувач чи що ти відповідав. Викликай, коли в підсумку бракує подробиць, замість "
+                    "вгадувати. query — ключові слова (імена файлів, фрагмент помилки); number — прочитати повністю "
+                    "повідомлення №N з результатів пошуку; без параметрів — останні репліки.",
+                    {"query": {"type": "string", "description": "ключові слова для пошуку"},
+                     "number": {"type": "integer", "description": "номер повідомлення з попереднього пошуку"}},
+                    [], h_recall_history))
     from .subagent import INVESTIGATE_TOOL      # лениво: subagent імпортує toolkit
     r.register(INVESTIGATE_TOOL)
     return r

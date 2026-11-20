@@ -145,7 +145,10 @@ def update_summary(summary: str, user_text: str, outcome: str,
 
 def as_context(summary: str) -> str:
     """Блок підсумку для підстановки в запит (порожній рядок, якщо нема)."""
-    return f"Контекст попередньої розмови (підсумок зробленого):\n{summary}\n\n" if summary else ""
+    if not summary:
+        return ""
+    from .history import HINT        # модель має ЗНАТИ, що деталі стисненої розмови можна дістати тулом
+    return f"Контекст попередньої розмови (підсумок зробленого):\n{summary}\n({HINT})\n\n"
 
 
 # ── Дайджест великого вкладення (читання частинами) ─────────────────────────
