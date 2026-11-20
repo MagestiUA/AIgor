@@ -2,6 +2,7 @@
 import reflex as rx
 from reflex_base.style import set_color_mode
 from agent import chat_projects as CP
+from agent import config
 from .state import (INPUT_ID, State)
 
 
@@ -245,6 +246,9 @@ def llm_connection_section() -> rx.Component:
     local = rx.vstack(
         field("Модель", rx.input(value=State.llm_model, on_change=State.set_llm_model, class_name="flex-1",
                                  placeholder="пусто = Qwen3.8-27B (UD-Q3_K_XL)")),
+        rx.hstack(*[rx.button(name, variant="soft", size="1", on_click=State.pick_local_preset(i))
+                    for i, (name, _m, _c) in enumerate(config.LOCAL_PRESETS)],
+                  class_name="flex-wrap gap-2 pl-[108px]"),
         gap="2", class_name="w-full",
     )
     return rx.vstack(

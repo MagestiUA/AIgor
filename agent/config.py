@@ -23,6 +23,12 @@ MODEL = "gemma4:26b-a4b-it-qat"   # дефолт OllamaClient; профілі н
 # Локальний режим застосунку: ОДНА модель на всі ролі й власний розмір вікна (за бенчмарком, див. LOCAL_CTX нижче).
 LOCAL_MODEL = "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL"   # те саме сімейство, що на сервері (Qwen3.8-27B)
 LOCAL_CTX = 65536
+# Швидкий вибір у налаштуваннях: (назва, модель Ollama, вікно). Uncensored — та сама вага, що на сервері, але на 16 ГБ
+# частина шарів іде на CPU, тому вікно менше (замір: 24k ≈ 28 ток/с, 64k ≈ 15–20).
+LOCAL_PRESETS = (
+    ("Qwen3.8-27B (швидка, 64k)", LOCAL_MODEL, LOCAL_CTX),
+    ("Qwen3.8-27B Uncensored (як на сервері, 24k)", "orcarouter/Qwen3.8-27B-Uncensored:q3_K_L", 24576),
+)
 
 REQUEST_TIMEOUT = 600
 

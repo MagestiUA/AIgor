@@ -1135,6 +1135,13 @@ class State(rx.State):
         self.llm_model = v
 
     @rx.event
+    def pick_local_preset(self, idx: int):
+        """Швидкий вибір локальної моделі разом із відповідним вікном (див. config.LOCAL_PRESETS)."""
+        _, model, ctx = config.LOCAL_PRESETS[int(idx)]
+        self.llm_model = model
+        self.llm_context = str(ctx)
+
+    @rx.event
     def set_llm_context(self, v: str):
         self.llm_context = "".join(ch for ch in v if ch.isdigit())[:7]
 
