@@ -181,6 +181,9 @@ def make_diagnostics(settings_path: Path | None = None, net_fetch=None, net_reso
         pass
     if settings.get("llm_api_key"):
         settings["llm_api_key"] = "<прихований>"
+    for e in settings.get("llm_servers") or []:                  # ключі збережених серверів теж не віддаємо
+        if isinstance(e, dict) and e.get("api_key"):
+            e["api_key"] = "<прихований>"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr("info.json", json.dumps(info, ensure_ascii=False, indent=2))
         z.writestr("settings.json", json.dumps(settings, ensure_ascii=False, indent=2))

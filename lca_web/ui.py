@@ -227,6 +227,11 @@ def llm_connection_section() -> rx.Component:
     def field(label, ctrl):
         return rx.hstack(rx.text(label, class_name="text-sm text-gray-300 w-24 shrink-0"),
                          ctrl, class_name="items-center gap-3 w-full")
+    models_pick = rx.cond(
+        State.llm_models.length() > 0,
+        field("Доступні", rx.select(State.llm_models, value=State.llm_model, on_change=State.set_llm_model,
+                                    placeholder="обрати зі списку сервера", class_name="flex-1")),
+        rx.text("Список моделей підтягується кнопкою «Перевірити».", class_name="text-xs text-gray-500 pl-[108px]"))
     remote = rx.vstack(
         field("Адреса", rx.input(value=State.llm_host, on_change=State.set_llm_host,
                                  placeholder="напр. llm.example.com", class_name="flex-1")),
@@ -238,6 +243,7 @@ def llm_connection_section() -> rx.Component:
             class_name="flex-1")),
         field("Модель", rx.input(value=State.llm_model, on_change=State.set_llm_model,
                                  placeholder="авто (перша на сервері)", class_name="flex-1")),
+        models_pick,
         gap="2", class_name="w-full",
     )
     ctx_field = field("Вікно (токени)", rx.input(
@@ -246,6 +252,7 @@ def llm_connection_section() -> rx.Component:
     local = rx.vstack(
         field("Модель", rx.input(value=State.llm_model, on_change=State.set_llm_model, class_name="flex-1",
                                  placeholder="пусто = Qwen3.8-27B (UD-Q3_K_XL)")),
+        models_pick,
         rx.hstack(*[rx.button(name, variant="soft", size="1", on_click=State.pick_local_preset(i))
                     for i, (name, _m, _c) in enumerate(config.LOCAL_PRESETS)],
                   class_name="flex-wrap gap-2 pl-[108px]"),
@@ -253,6 +260,14 @@ def llm_connection_section() -> rx.Component:
     )
     return rx.vstack(
         rx.text("Підключення до LLM", class_name="text-xs text-gray-500 uppercase tracking-wide"),
+        rx.hstack(
+            rx.select(State.server_names, value=State.server_pick, on_change=State.set_server_pick,
+                      placeholder="Збережені сервери", class_name="flex-1", disabled=State.server_names.length() == 0),
+            rx.button("Завантажити", variant="soft", on_click=State.load_server, disabled=State.server_pick == ""),
+            rx.button(rx.icon("trash-2", size=14), variant="ghost", color_scheme="red", on_click=State.delete_server,
+                      disabled=State.server_pick == "", title="Видалити зі збережених"),
+            class_name="items-center gap-2 w-full",
+        ),
         rx.segmented_control.root(
             rx.segmented_control.item("Локально (Ollama)", value="ollama"),
             rx.segmented_control.item("Сервер (OpenAI API)", value="openai"),
@@ -267,6 +282,8 @@ def llm_connection_section() -> rx.Component:
             rx.button("Перевірити", variant="soft", on_click=State.test_llm_connection,
                       loading=State.llm_testing),
             rx.button("Зберегти", on_click=State.save_llm_settings),
+            rx.button("Зберегти сервер", variant="soft", on_click=State.save_server,
+                      title="Додати ці налаштування разом з API-ключем до списку збережених серверів"),
             rx.button("Діагностика", variant="outline", on_click=State.export_diagnostics,
                       title="Зібрати логи в архів, щоб надіслати розробнику"),
             class_name="gap-2",

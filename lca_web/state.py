@@ -385,6 +385,9 @@ class State(rx.State):
     llm_rev: int = 0               # збільшується при збереженні підключення → перерахунок панелі контексту
     llm_key_input: str = ""
     llm_key_saved: bool = False
+    server_names: list[str] = []           # назви збережених серверів (самі профілі й ключі — лише у файлі налаштувань)
+    server_pick: str = ""
+    llm_models: list[str] = []             # моделі, які повернув сервер/Ollama при «Перевірити» (випадаючий список)
     llm_test_msg: str = ""
     llm_test_ok: bool = False
     llm_testing: bool = False
@@ -1024,7 +1027,9 @@ class State(rx.State):
         self.llm_model = d.get("llm_model", "")
         self.llm_context = str(d.get("llm_context", "") or "")
         self.llm_key_saved = bool(d.get("llm_api_key"))
-        A.migrate_legacy()                                       # вкладення зі старого місця (<репо>/.attachments)
+        from agent import servers
+        self.server_names = servers.names()
+        A.migrate_legacy()                                      # вкладення зі старого місця (<репо>/.attachments)
         self.gpu_enabled = bool(d.get("gpu_monitor", True))
         self.gpu_port = str(d.get("gpu_monitor_port") or "8001")
         self.llm_host, self.llm_port = d.get("llm_host", ""), str(d.get("llm_port", ""))
@@ -1151,6 +1156,56 @@ class State(rx.State):
 
     @rx.event
     def save_llm_settings(self):
+        self._apply_llm_settings()
+
+    @rx.event
+    def set_server_pick(self, v: str):
+        self.server_pick = v
+
+    @rx.event
+    def save_server(self):
+        """«Зберегти сервер»: застосувати поточні налаштування й додати їх (разом з API-ключем) до списку збережених."""
+        from agent import servers
+        from agent import settings as S
+        self._apply_llm_settings()
+        cur = S.load()
+        name = servers.save({"backend": self.llm_backend, "host": self.llm_host, "port": self.llm_port,
+                             "model": self.llm_model, "context": self.llm_context, "api_key": cur.get("llm_api_key", "")})
+        self.server_names = servers.names()
+        self.server_pick = name
+        self.llm_test_msg, self.llm_test_ok = f"Сервер збережено: {name}", True
+
+    @rx.event
+    def load_server(self):
+        """«Завантажити»: підставити збережений профіль (разом з ключем) і одразу застосувати."""
+        from agent import servers
+        from agent import settings as S
+        e = servers.get(self.server_pick)
+        if not e:
+            self.llm_test_msg, self.llm_test_ok = "Оберіть збережений сервер зі списку.", False
+            return
+        self.llm_backend, self.llm_host, self.llm_port = e["backend"] or "openai", e["host"], e["port"]
+        self.llm_model, self.llm_context, self.llm_key_input = e["model"], e["context"], ""
+        self.llm_models = []                                   # список моделей попереднього сервера вже не актуальний
+        d = S.load()
+        d.update(llm_backend=self.llm_backend, llm_host=e["host"], llm_port=e["port"], llm_model=e["model"],
+                 llm_context=e["context"], llm_api_key=e["api_key"])
+        S.save(d)
+        reset_client()
+        self.llm_rev += 1
+        self.llm_key_saved = bool(e["api_key"])
+        self.llm_test_msg, self.llm_test_ok = f"Завантажено: {e['name']}", True
+
+    @rx.event
+    def delete_server(self):
+        from agent import servers
+        name = self.server_pick
+        if name and servers.delete(name):
+            self.llm_test_msg, self.llm_test_ok = f"Видалено зі збережених: {name}", True
+        self.server_names = servers.names()
+        self.server_pick = ""
+
+    def _apply_llm_settings(self):
         """Зберегти підключення й скинути закешований клієнт — наступний запит піде
         вже на нову адресу/ключ. Порожнє поле ключа = лишити збережений."""
         from agent import settings as S
@@ -1292,14 +1347,17 @@ class State(rx.State):
             local_model = self.llm_model.strip() if self.llm_backend == "ollama" else None
         if local_model is not None:                                # локальний режим: Ollama, а не OpenAI-сервер
             ok, msg = await asyncio.to_thread(lambda: backend.test_ollama(local_model))
+            found = await asyncio.to_thread(backend.ollama_models)
             async with self:
                 self.llm_testing, self.llm_test_ok, self.llm_test_msg = False, ok, msg
+                self.llm_models = found
             return
         key = typed or S.load().get("llm_api_key", "")
         ok, msg, models = await asyncio.to_thread(
             lambda: backend.test_connection(backend.build_base_url(host, port), key))
         async with self:
             self.llm_testing, self.llm_test_ok, self.llm_test_msg = False, ok, msg
+            self.llm_models = list(models) if ok else []
             if ok and models and not self.llm_model.strip():
                 self.llm_model = models[0]
 

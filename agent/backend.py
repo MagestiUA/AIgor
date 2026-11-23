@@ -85,6 +85,16 @@ def test_connection(base_url: str, api_key: str = "", timeout: float = 15.0) -> 
     return True, f"З'єднання OK. Моделі: {', '.join(models) or '—'}", models
 
 
+def ollama_models(host: str = "", timeout: float = 5.0) -> list[str]:
+    """Моделі, завантажені в локальну Ollama (для списку вибору в налаштуваннях); порожньо, якщо вона не відповідає."""
+    try:
+        r = requests.get((host or config.HOST).rstrip("/") + "/api/tags", timeout=timeout)
+        r.raise_for_status()
+        return [m.get("name", "") for m in r.json().get("models", []) if m.get("name")]
+    except (requests.exceptions.RequestException, ValueError):
+        return []
+
+
 def test_ollama(model: str = "", host: str = "", timeout: float = 5.0) -> tuple[bool, str]:
     """Перевірка локальної Ollama: сервер відповідає на /api/tags і потрібна модель завантажена."""
     host = (host or config.HOST).rstrip("/")
