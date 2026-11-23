@@ -103,6 +103,7 @@ class OpenAIClient:
         self.retry_delay = retry_delay
         self.last_stats: dict = {}
         self.last_error: str = ""
+        self.strict = "deepseek" in base_url.lower()    # DeepSeek не знає vLLM-полів; для решти — автоперехід після 400
 
     # ── Допоміжне ───────────────────────────────────────────────────────────
     def _headers(self) -> dict:
@@ -113,25 +114,64 @@ class OpenAIClient:
         return {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
 
     def _payload(self, messages, tools, profile, fmt, stream: bool) -> dict:
+        msgs = _to_openai_messages(messages)
         p: dict = {
             "model": self.model,              # профільний "model" — ollama-ім'я, тут ігноруємо
-            "messages": _to_openai_messages(messages),
+            "messages": msgs,
             "stream": stream,
             "temperature": profile.get("temperature", 0.2),
-            "chat_template_kwargs": {"enable_thinking": bool(profile.get("think"))},
         }
-        for k in _PASS_OPTIONS:
-            if k in profile.get("options", {}):
-                p[k] = profile["options"][k]
+        if self.strict:
+            # «чистий» OpenAI-API (DeepSeek та ін.): без vLLM-специфічних полів; роздуми вмикаються параметром thinking
+            # у історії є виклики тулів → DeepSeek вимагав би повертати reasoning_content кожного ходу; тож без роздумів
+            in_tool_loop = any(m.get("role") == "tool" or m.get("tool_calls") for m in msgs)
+            p["thinking"] = {"type": "enabled" if profile.get("think") and not in_tool_loop else "disabled"}
+        else:
+            p["chat_template_kwargs"] = {"enable_thinking": bool(profile.get("think"))}
+            for k in _PASS_OPTIONS:
+                if k in profile.get("options", {}):
+                    p[k] = profile["options"][k]
         if stream:
             p["stream_options"] = {"include_usage": True}
         if tools:
             p["tools"] = tools
         if fmt:
-            p["response_format"] = ({"type": "json_object"} if fmt == "json" else
-                                    {"type": "json_schema",
-                                     "json_schema": {"name": "out", "schema": fmt}})
+            if self.strict:                   # json_schema підтримує не кожен сервер: json_object + схема в підказці
+                p["response_format"] = {"type": "json_object"}
+                if fmt != "json":
+                    hint = "Respond ONLY with a JSON object matching this JSON schema: " + json.dumps(fmt, ensure_ascii=False)
+                    msgs.insert(0, {"role": "system", "content": hint})
+                elif not any("json" in str(m.get("content", "")).lower() for m in msgs):
+                    msgs.insert(0, {"role": "system", "content": "Respond ONLY with a valid JSON object."})
+            else:
+                p["response_format"] = ({"type": "json_object"} if fmt == "json" else
+                                        {"type": "json_schema",
+                                         "json_schema": {"name": "out", "schema": fmt}})
         return p
+
+    def _send(self, messages, tools, profile, fmt, stream: bool):
+        """POST із автопереходом у strict-режим: сервер відхилив нестандартні поля (400) → повторюємо «чистим» запитом
+        і запам'ятовуємо це для наступних викликів. Для адрес deepseek strict вмикається одразу."""
+        r = self._post_with_retry(self._payload(messages, tools, profile, fmt, stream), stream=stream)
+        if r.status_code == 400 and not self.strict:
+            logs.get("llm").warning("HTTP 400 (%s) — повторюю у strict-режимі (без vLLM-полів)", r.text[:200])
+            r.close()
+            self.strict = True
+            r = self._post_with_retry(self._payload(messages, tools, profile, fmt, stream), stream=stream)
+        return r
+
+    @staticmethod
+    def _check(r) -> None:
+        """raise_for_status, але з текстом помилки від сервера (інакше видно лише «400 Bad Request»)."""
+        if r.ok:
+            return
+        body = ""
+        try:
+            body = r.text[:400]
+        except Exception:                                       # noqa: BLE001
+            pass
+        logs.get("llm").error("HTTP %s: %s", r.status_code, body)
+        raise requests.exceptions.HTTPError(f"{r.status_code} від сервера: {body or r.reason}", response=r)
 
     def _post_with_retry(self, payload: dict, stream: bool = False):
         """POST /chat/completions. Ретраїмо до wake_timeout (сервер може прокидатись
@@ -166,10 +206,8 @@ class OpenAIClient:
     def chat(self, messages: list[dict], tools: list | None = None,
              profile: dict = config.EXECUTOR, fmt: str | dict | None = None) -> dict:
         t0 = time.monotonic()
-        r = self._post_with_retry(self._payload(messages, tools, profile, fmt, stream=False))
-        if not r.ok:
-            logs.get("llm").error("HTTP %s від %s: %s", r.status_code, self.base_url, r.text[:300])
-        r.raise_for_status()
+        r = self._send(messages, tools, profile, fmt, stream=False)
+        self._check(r)
         data = r.json()
         msg = data["choices"][0]["message"]
         content, thinking = _split_think(msg.get("content") or "",
@@ -196,9 +234,8 @@ class OpenAIClient:
         t_first: float | None = None
         acc: dict[int, dict] = {}
         usage: dict = {}
-        with self._post_with_retry(self._payload(messages, tools, profile, fmt, stream=True),
-                                   stream=True) as r:
-            r.raise_for_status()
+        with self._send(messages, tools, profile, fmt, stream=True) as r:
+            self._check(r)
             for line in r.iter_lines():
                 if stop_event and stop_event.is_set():
                     break
