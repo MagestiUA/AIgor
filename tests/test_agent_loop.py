@@ -194,7 +194,7 @@ def main() -> None:
         # 1) модель вічно б'ється в одну стіну: підказка після 3-го, зупинка після 6-го виклику
         loop = Recorder(lambda s, m: read_missing("нема.py"))
         f, lg = run_step("залип", ctx, client=loop, max_iters=None)
-        assert f.startswith(STUCK_PREFIX) and len(lg) == 6 and loop.n == 6, (f, len(lg), loop.n)
+        assert f.startswith(STUCK_PREFIX) and len(lg) == 6 and loop.n == 7, (f, len(lg), loop.n)   # 7-й виклик — зведення зробленого
         assert any("repeating the same actions" in u for u in loop.seen[3]), "після 3-го виклику має бути підказка"
         assert is_incomplete(f)
 

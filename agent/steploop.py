@@ -158,7 +158,11 @@ async def run_loop(messages: list, *, registry, ctx, client, hooks: LoopHooks, c
             log.warning("зациклення (%s): %s | останній результат: %s", kind, reason,
                         guard.last_result[:120].replace(chr(10), " "))
             if kind == "stop":
-                final = "" if cfg.finalize_on_stuck else guard.stuck_message(reason)
+                if cfg.finalize_on_stuck:
+                    final = ""
+                else:                                           # зупинка + зведення зробленого (а не лише «зациклився»)
+                    out = await conclude(compact_first=True)
+                    final = guard.stuck_message(reason) + (f"\nЩо вдалося з'ясувати і зробити:\n{out}" if out else "")
                 break
             messages.append({"role": "user", "content": WARN_TEXT.format(reason=reason, last=guard.last_result[:300])})
             await hooks.guard_warning(reason)
@@ -202,10 +206,11 @@ async def run_loop(messages: list, *, registry, ctx, client, hooks: LoopHooks, c
             break
     else:
         log.warning("крок досяг ліміту ітерацій (%d)", cfg.max_iters)
-        if actions and not reads.acted:                        # лише читали: замість «невдачі» — висновок зі зібраного
-            out = await conclude()
+        if actions:
+            out = await conclude(compact_first=True)           # завжди даємо зведення зробленого — не мовчазну «невдачу»
             if out:
-                final = out
+                # лише читали: висновок і є результат кроку; були дії — крок лишається НЕ завершеним, але з поясненням
+                final = out if not reads.acted else f"{ITER_LIMIT_MSG}. Що вдалося з'ясувати і зробити:\n{out}"
     return LoopResult(final=final, actions=actions, stats=stats)
 
 

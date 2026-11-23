@@ -102,6 +102,17 @@ def main() -> None:
     v = feed(g, [("project_note", {"path": f"f{i}.py", "note": "n"}, "нотатку збережено в карті проєкту") for i in range(8)])
     assert all(x is None for x in v)
 
+    # 11) F (діагностика b_0.0.37): та сама команда з тим самим виводом чергується з read_file на інші зсуви — результати
+    #     read_file щоразу різні, тож A–E мовчали, а крок спалював усі 60 ітерацій
+    g = LoopGuard()
+    calls = []
+    for i in range(12):
+        calls += [("run_shell", {"command": "python check.py"}, "той самий довгий вивід перевірки " * 20),
+                  ("read_file", {"path": "a.py", "offset": 100 + i}, f"фрагмент файлу {i} " * 3)]
+    v = feed(g, calls)
+    first = next(i for i, x in enumerate(v) if x)
+    assert v[first][0] == "warn" and first < 12 and "×5" in v[first][1], (first, v[first])
+
     # context_full
     assert context_full(240_000, 262_144) and not context_full(100_000, 262_144) and not context_full(10, 0)
     print("OK: loopguard — довга робота не рветься, повтор/різні команди з тим самим результатом/цикл ловляться, warn→stop")

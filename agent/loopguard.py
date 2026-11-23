@@ -29,7 +29,8 @@ import re
 
 MIN_RESULT_LEN = 12          # коротші результати ("rc=0", "ok") можуть збігатися законно
 WINDOW = 24
-NOVELTY_WINDOW = 12         # D: стільки останніх викликів без жодного нового результату
+REPEAT_IN_WINDOW = 5        # F: стільки однакових (дія, результат) у вікні — зациклення, навіть із вкрапленнями інших дій
+NOVELTY_WINDOW = 12        # D: стільки останніх викликів без жодного нового результату
 IGNORED_TOOLS = {"project_note"}     # службові: однакові відповіді тут — норма
 
 WARN_TEXT = (
@@ -103,6 +104,14 @@ class LoopGuard:
         #    результати: вивід «плаває» (час, лічильники), тож A–D його не бачать, але агент крутить те саме
         if len(self.nsigs) >= WINDOW and len(set(self.nsigs)) <= 3:
             return f"останні {WINDOW} викликів — лише {len(set(self.nsigs))} різні дії, що повторюються"
+        # F: ТА САМА дія з ТИМ САМИМ змістовним результатом ≥5 разів у вікні, хай між ними й інші виклики
+        #    (діагностика b_0.0.37: run_shell з тим самим 2573-символьним виводом чергувався з read_file на інші зсуви —
+        #    A–E цього не бачили, бо результати read_file щоразу інші, а крок спалив усі 60 ітерацій)
+        pairs = [(s, h) for s, h, n, _ in c if n >= MIN_RESULT_LEN]
+        if pairs:
+            top = max(set(pairs), key=pairs.count)
+            if pairs.count(top) >= REPEAT_IN_WINDOW:
+                return f"одна й та сама дія з тим самим результатом ×{pairs.count(top)} ({top[0][:60]})"
         return None
 
     def check(self) -> tuple[str, str] | None:

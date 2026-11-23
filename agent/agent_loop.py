@@ -199,7 +199,7 @@ def research_report(step_text: str, context: str, ctx, registry) -> str:
 def is_incomplete(final: str | None) -> bool:
     """Крок НЕ завершено (ліміт / зациклення / переповнений контекст) — не вважати «done»."""
     f = final or ""
-    return f == ITER_LIMIT_MSG or f.startswith(STUCK_PREFIX) or f.startswith(CONTEXT_FULL_PREFIX) or f.startswith(CHECKPOINT_PREFIX)
+    return f.startswith(ITER_LIMIT_MSG) or f.startswith(STUCK_PREFIX) or f.startswith(CONTEXT_FULL_PREFIX) or f.startswith(CHECKPOINT_PREFIX)
 
 SYSTEM = (
     "You are an execution agent for ONE task step on a Windows machine (PowerShell). "

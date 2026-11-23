@@ -1942,6 +1942,17 @@ class State(rx.State):
                           "жодних роздумів, самокорекцій чи службових позначок.")
             msgs.append({"role": "user", "content": nudge})
             body, thinking, _ = await self._run_stream(client.chat_stream(msgs, profile=profile))
+        if not (body or "").strip():
+            # усі спроби з думанням дали лише роздуми (живий кейс b_0.0.37: «(порожня відповідь)») — остання спроба БЕЗ думання
+            def _plain():
+                m = client.chat(msgs + [{"role": "user", "content": "Дай коротку конкретну відповідь користувачу зараз, "
+                                         "без роздумів, на основі всього, що вже відомо."}],
+                                profile={**profile, "think": False})
+                return (m.get("content") or "").strip()
+            try:
+                body = await asyncio.to_thread(_plain)
+            except Exception:                                   # noqa: BLE001 — запасний шлях не має ламати відповідь
+                body = ""
         return body, thinking
 
     async def _run_tool_chat(self, msgs: list, tctx: ToolContext, client,

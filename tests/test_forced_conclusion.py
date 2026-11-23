@@ -49,7 +49,7 @@ def main() -> None:
     # 3) була дія-запис → крок НЕ примушуємо завершитись (за ним стежить планувальник) → «ліміт ітерацій»
     cl = Client(write_at=2)
     final, _ = AL.run_step("Прочитай і запиши", ctx_for(cl), cl, default_registry(), max_iters=14)
-    assert final == AL.ITER_LIMIT_MSG, final
+    assert AL.is_incomplete(final) and final.startswith(AL.ITER_LIMIT_MSG) and "ВИСНОВОК" in final, final   # + зведення зробленого
     # 4) що вважаємо дослідницьким кроком
     for t in ("Знайди, де обробляється вставка зображень", "З'ясуй, як працює самооновлення", "Проаналізуй логи", "Як самооновлення перевіряє цілісність exe?", "Де зберігаються вкладення"):
         assert AL.is_research_step(t), t
