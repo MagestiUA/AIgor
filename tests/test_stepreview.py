@@ -96,6 +96,25 @@ def main() -> None:
     r = check_consistency(st, Cl('{"ok": false, "step_id": 2, "note": "перероби"}'))
     assert r == {"ok": False, "step_id": 2, "note": "перероби"}
     assert check_consistency(st, Cl("не json"))["ok"] is True
+    # підсумок виконання: модель пише звіт зі ВСІХ фактів плану; збій/порожньо — звіт кодом (кроки + змінені файли)
+    plan = TaskState(task="Додай логування")
+    plan.add_step("llm", "Додати logger у a.py", "a.py"); plan.add_step("llm", "Запустити тести")
+    plan.set_result(1, "done", "додано logger"); plan.set_result(2, "done", "тести пройшли")
+    plan.facts["змінені файли"] = "a.py"
+
+    class Say:
+        def __init__(self, out): self.out, self.seen = out, []
+        def chat(self, messages, **kw):
+            self.seen.append(messages)
+            if isinstance(self.out, Exception): raise self.out
+            return {"content": self.out}
+    c = Say("- додано logger у a.py | - тести пройшли")
+    assert R.final_summary(plan, c, "Звірка: ок.") == "- додано logger у a.py | - тести пройшли"
+    user = c.seen[0][1]["content"]
+    assert "додано logger" in user and "a.py" in user and "Звірка: ок." in user      # модель бачить факти плану й перевірку
+    for bad in (Say(RuntimeError("лежить")), Say("  ")):
+        out = R.final_summary(plan, bad)
+        assert "Додати logger" in out and "Змінені файли: a.py" in out and "✅" in out
     print("OK: stepreview — точні факти команд, парсинг/застосування рішень, збереження звіту")
 
 

@@ -1600,7 +1600,14 @@ class State(rx.State):
                     self._save_pending(plan)              # можна відновити кнопкою «Виконати»
         elif touched_by_step:
             verify_note = await self._verify_plan(plan, root, client, ctx, touched_by_step, stop_ev, att_note)
+        report = ""
+        if not stopped and sum(1 for s in plan.steps if not s.is_noop) >= 2:
+            async with self:
+                self.status = "Готую підсумок…"
+            report = await asyncio.to_thread(lambda: review.final_summary(plan, client, verify_note))
         async with self:
+            if report:                                              # що саме зроблено, а не лише «Готово»
+                self._append("assistant", "**Підсумок виконання**\n\n" + report, "answer")
             self._append("assistant", "⛔ Зупинено — решту можна продовжити кнопкою «Виконати»" if stopped
                          else "Готово ✓", "note")
         return render_for_planner(plan) + (f"\n{verify_note}" if verify_note else "")

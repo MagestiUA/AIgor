@@ -195,6 +195,42 @@ CONSISTENCY_SCHEMA = {
 }
 
 
+SUMMARY_SYSTEM = (
+    "You write the FINAL REPORT to the user after an agent finished a multi-step task. You get the task and the plan "
+    "with each step's result and the exact facts (commands, outputs, changed files). Write a SHORT report (3-8 lines, "
+    "markdown bullets) in the language of the task: WHAT was actually done (which files were changed/created and what "
+    "changed in them), the RESULT of checks/tests if any were run, and anything NOT done, failed or left for the user. "
+    "State only what the facts confirm - never invent. No preamble, no 'Done' alone, no tool calls."
+)
+
+
+def deterministic_summary(state) -> str:
+    """Запасний звіт кодом (якщо модель не відповіла): кроки з результатами й змінені файли."""
+    lines = []
+    for s in state.steps:
+        if s.is_noop:
+            continue
+        mark = {"done": "✅", "failed": "❌"}.get(s.status, "⬜")
+        res = (s.result or "").strip().splitlines()[0][:160] if (s.result or "").strip() else ""
+        lines.append(f"- {mark} {s.description[:120]}" + (f" — {res}" if res else ""))
+    files = state.facts.get("змінені файли")
+    if files:
+        lines.append(f"- Змінені файли: {files}")
+    return "\n".join(lines)
+
+
+def final_summary(state, client, verify_note: str = "") -> str:
+    """Короткий підсумок для користувача після виконання плану: що саме зроблено. Збій моделі → звіт кодом."""
+    text = render_for_planner(state) + (f"\n\nПеревірка: {verify_note}" if verify_note else "")
+    try:
+        msg = client.chat([{"role": "system", "content": SUMMARY_SYSTEM}, {"role": "user", "content": text}],
+                          profile=config.EXECUTOR)
+        out = (msg.get("content") or "").strip()
+    except Exception:                                           # noqa: BLE001 — підсумок не критичний
+        out = ""
+    return out or deterministic_summary(state)
+
+
 def check_consistency(state, client) -> dict:
     """Звірити узгодженість виконаного плану. -> {ok, step_id, note}."""
     msg = client.chat(
