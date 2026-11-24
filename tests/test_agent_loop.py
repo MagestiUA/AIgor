@@ -96,28 +96,30 @@ def main() -> None:
     # замість виклику -> нюджимо НЕЗАЛЕЖНО від should_nudge (контент не порожній і
     # не просочений, інакше вважався б валідним завершенням).
     assert pending_continuation([
-        {"role": "tool", "content": "=== big.txt (0-32000 з 70000) ===\nabc\n\n"
-         "…[лишилось 38000 символів. Щоб продовжити, виклич "
-         "read_attachment(name='big.txt', offset=32000)]"},
-    ])
+        {"role": "tool", "content": "[big.txt: рядки 1-800 з 2000]\nabc\n\n"
+         "…[лишилось 1200 рядків. Щоб продовжити, виклич read_file(path='big.txt', start_line=801)]"},
+    ]) == {"function": {"name": "read_file", "arguments": {"path": "big.txt", "start_line": 801}}}
     assert not pending_continuation([{"role": "tool", "content": "=== small.txt ===\nok"}])
+    # навмисне часткове читання файлу коду (limit) — НЕ дочитуємо самі
+    assert not pending_continuation([{"role": "tool", "content": "[a.py: рядки 1-3 з 90]\nx\n…[далі ще 87 рядків: "
+                                                                 "read_file(path='a.py', start_line=4)]"}])
     assert not pending_continuation([])
     att_dir = Path(tempfile.mkdtemp())
-    (att_dir / "big.txt").write_text("x" * 40_000, encoding="utf-8")
+    (att_dir / "big.txt").write_text("x" * 99 + "\n" * 1 + ("y" * 99 + "\n") * 399, encoding="utf-8")   # 40k у 400 рядках
     ctx_att = ToolContext(root=root, permissions={"edits": "auto", "shell": "allowlist"},
                           attachments_dir=att_dir)
     # Модель прочитала перший шматок, потім ЗАМІСТЬ продовження пагінації написала
     # прозою "продовжую читати" (живий кейс: повторюється так 15+ разів підряд) —
     # авто-відновлення саме дочитує решту, без участі моделі взагалі.
     continue_then_done = LoopStub([
-        {"tool_calls": [{"function": {"name": "read_attachment",
-                                      "arguments": {"name": "big.txt", "offset": 0}}}]},
+        {"tool_calls": [{"function": {"name": "read_file",
+                                      "arguments": {"path": "big.txt"}}}]},
         {"content": "Продовжую читати файл.", "tool_calls": []},   # не порожньо, не просочено
         {"content": "Готово, прочитав усе.", "tool_calls": []},
     ])
     final7, log7 = run_step("прочитай big.txt", ctx_att, client=continue_then_done, max_iters=6)
     assert "Готово" in final7, final7
-    assert sum(1 for e in log7 if "read_attachment" in e) == 2, log7   # offset=0 + авто-продовження offset=32000
+    assert sum(1 for e in log7 if e.startswith("read_file")) == 2, log7   # перша частина + авто-продовження
 
     # Наративне оголошення наміру викликати тул без structured tool_calls
     # ("I will call read_attachment for all 6 files first.") -> nudge -> дія.

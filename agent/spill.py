@@ -2,7 +2,7 @@
 
 Раніше `run_shell` різав вивід до ПЕРШИХ 2000 символів: помилка (зазвичай у кінці) губилась, а решту модель
 не могла дістати. Тепер повний вивід лягає у ~/.local-code-agent/tool-output/, у контекст іде початок і кінець, а модель
-за потреби дочитує файл через read_file(path, offset=…) — тека входить до дозволених для read_file.
+за потреби шукає в ньому (search) або дочитує (read_file(path, start_line=…)) — тека входить до дозволених.
 Тека живе в профілі користувача (не в репозиторії, щоб dev-watcher не перезапускався), старі файли чистимо.
 """
 from __future__ import annotations
@@ -39,4 +39,5 @@ def spill(text: str, label: str = "out", head: int = HEAD, tail: int = TAIL) -> 
     except OSError:
         return text[:head] + f"\n…[пропущено {len(text) - head - tail} симв.]…\n" + text[-tail:]
     return (f"{text[:head]}\n…[пропущено {len(text) - head - tail} з {len(text)} симв.; повний вивід у файлі "
-            f"{path} — read_file(path, offset=N), щоб дочитати]…\n{text[-tail:]}")
+            f"{path} — знайти потрібне: search(pattern, path='{path}'), дочитати: read_file(path='{path}', "
+            f"start_line=N)]…\n{text[-tail:]}")

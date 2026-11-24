@@ -16,8 +16,12 @@ def summarize_args(name: str, args: dict, n: int = 400) -> str:
         s = a.get("command", "")
     elif name in ("read_file", "list_dir", "read_attachment"):
         s = a.get("path") or a.get("name") or "."
-        if a.get("offset"):
+        if a.get("start_line"):
+            s += f" (з рядка {a['start_line']}" + (f", {a['limit']} рядків)" if a.get("limit") else ")")
+        elif a.get("offset"):
             s += f" (з позиції {a['offset']})"
+    elif name == "search":
+        s = f"«{a.get('pattern', '')}»" + (f" у {a['path']}" if a.get("path") else "") + (f" [{a['glob']}]" if a.get("glob") else "")
     elif name == "write_file":
         s = f"{a.get('path', '')}  ({len(a.get('content', '') or '')} симв.)"
     elif name in ("edit_file", "create_from_source"):

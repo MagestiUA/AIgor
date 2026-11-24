@@ -49,13 +49,14 @@ from agent.memory import render_for_planner, render_for_user
 from agent.planner import deliberate
 from agent.project import load_project_doc, scan_structure
 from agent.project_info import git_info
-from agent.toolkit import ATTACHMENT_CHUNK_SIZE, ToolContext, default_registry
+from agent.toolkit import ToolContext, default_registry
 
 CHAT_SYSTEM = (
     "You are a helpful thinking assistant. You can search the web with the web_search "
     "tool when you need current or external information. If the user attached files, "
-    "their names are listed in context — read any you need with the read_attachment(name) "
-    "tool (NEVER ask the user to paste or resend them; they are already available). "
+    "their names are listed in context — read any you need with the read_file(path=<name>) "
+    "tool, find a place in a big one with search(pattern) (NEVER ask the user to paste or resend them; "
+    "they are already available). "
     "Answer in the user's language."
 )
 
@@ -1898,11 +1899,10 @@ class State(rx.State):
         return body, thinking, tool_calls
 
     # Тули, доступні read-only режимам (чат / answer): пошук + читання файлів/вкладень.
-    _READONLY_TOOLS = ("web_search", "read_file", "list_dir", "read_attachment", "read_topic")
+    _READONLY_TOOLS = ("web_search", "read_file", "search", "list_dir", "read_topic")
 
-    # Заголовок read_attachment, коли файл читається частинами (toolkit.h_read_attachment):
-    # "=== name (OFFSET-END з TOTAL) ===" — з'являється лише коли total > CHUNK_SIZE.
-    _PAGINATED_HEADER_RE = re.compile(r"^=== (.+?) \(\d+-\d+ з \d+\) ===\n", re.MULTILINE)
+    # Заголовок read_file, коли файл читається частинами (toolkit.h_read_file): "[name: рядки A-B з N]".
+    _PAGINATED_HEADER_RE = re.compile(r"^\[(.+?): рядки \d+-\d+ з \d+\]\n")
     # Хвіст-підказка "лишилось N символів... offset=X)]" — лишаємо як є, щоб
     # agent_loop.pending_continuation продовжував працювати й після заміни на дайджест.
     _CONTINUATION_SUFFIX_RE = re.compile(r"\n\n…\[лишилось .*?\]$", re.DOTALL)
@@ -1960,7 +1960,9 @@ class State(rx.State):
                 self._act_done(aid, f"{time.monotonic() - t_tool:.1f}с · " + act.clip_result(result),
                                ok=act.result_ok(result))
             shown = result
-            if digest_memory is not None and name == "read_attachment" and client is not None:
+            if (digest_memory is not None and name in ("read_attachment", "read_file") and client is not None
+                    and tctx.attachments_dir and self._PAGINATED_HEADER_RE.match(result or "")
+                    and (Path(tctx.attachments_dir) / self._PAGINATED_HEADER_RE.match(result).group(1)).is_file()):
                 async with self:
                     self.status = f"Узагальнюю прочитане ({label})…"
                 shown = await self._digest_attachment_chunk(label, result, digest_memory, client,
@@ -2163,7 +2165,7 @@ class State(rx.State):
         others = [n for n in (other_names or []) if n]
         if not cur and not others:
             return content
-        lines = ["[Доступні файли — читай тулом read_attachment(name):"]
+        lines = ["[Доступні файли — читай тулом read_file(path=<ім'я>), шукай у них — search(pattern):"]
         if cur:
             lines.append("• Додані до ЦЬОГО повідомлення (опрацюй): " + "; ".join(cur))
         if others:
@@ -2458,7 +2460,7 @@ class State(rx.State):
                 att_names.append(paste_name)
                 text = (f"[Вставлений текст ({kb} KB) занадто великий для прямого "
                         f"включення — збережено як вкладення '{paste_name}'. Прочитай "
-                        f"його частинами через read_attachment('{paste_name}').]")
+                        f"його через read_file('{paste_name}') частинами або знайди потрібне search(pattern).]")
             # Імена прикріплених файлів → у саме повідомлення (видно в чаті), потім
             # стейджинг-чіпи прибираємо з-під інпута. Файли лишаються на диску.
             self._append("user", text, attachments=att_names, thumbs=thumbs)

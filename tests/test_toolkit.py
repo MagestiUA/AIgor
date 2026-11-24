@@ -46,22 +46,44 @@ def main() -> None:
     assert "записано" in reg.dispatch("write_file", {"path": "deep/n/c.txt", "content": "y"}, ctx)
     assert (root / "deep" / "n" / "c.txt").read_text(encoding="utf-8") == "y"
 
-    # read_file великого файлу обрізає й підказує create_from_source
-    (root / "big.py").write_text("# c\n" * 5000, encoding="utf-8")
+    # read_file великого файлу віддає частину за РЯДКАМИ і підказує, як читати далі (і create_from_source)
+    (root / "big.py").write_text("".join(f"# рядок {i}\n" for i in range(1, 3001)), encoding="utf-8")
     big = reg.dispatch("read_file", {"path": "big.py"}, ctx)
-    assert "offset=" in big and "create_from_source" in big and "з 20000]" in big
-    # ...і дочитується частинами через offset до кінця (живий кейс Cerberus3: без offset
-    # модель не могла прочитати файл > 8000 символів і вигорала на run_shell)
+    assert big.startswith("[big.py: рядки 1-") and "з 3000]" in big, big[:80]
+    assert "start_line=" in big and "create_from_source" in big and "search(" in big
+    # ...і дочитується частинами до кінця (живий кейс Cerberus3: модель не могла дочитати файл і вигорала на run_shell)
+    import re as _re
+    got, nxt = [], 1
+    for _ in range(50):
+        part = reg.dispatch("read_file", {"path": "big.py", "start_line": nxt}, ctx)
+        head, body = part.split("\n", 1)
+        a, b = map(int, _re.search(r"рядки (\d+)-(\d+)", head).groups())
+        assert a == nxt
+        got += body.split("\n\n…[файл триває")[0].split("\n")
+        if b >= 3000:
+            break
+        nxt = b + 1
+    assert got == [f"# рядок {i}" for i in range(1, 3001)], (len(got), got[:2], got[-2:])
+    # точкове читання: start_line + limit (як після search)
+    part = reg.dispatch("read_file", {"path": "big.py", "start_line": 120, "limit": 3}, ctx)
+    assert part.startswith("[big.py: рядки 120-122 з 3000]") and "# рядок 121" in part and "# рядок 123" not in part.split("…")[0]
+    assert "start_line=123" in part
+    assert "лише 3000 рядків" in reg.dispatch("read_file", {"path": "big.py", "start_line": 5000}, ctx)
+    # старий offset (символи) лишається для дуже довгих рядків
+    assert reg.dispatch("read_file", {"path": "big.py", "offset": 5}, ctx).startswith("[big.py: символи 5-")
+    # search: файл:рядок: текст; розумний регістр; glob; некоректний вираз — як текст; поза межами — заборонено
+    (root / "pkg").mkdir()
+    (root / "pkg" / "m.py").write_text("def Load_Config():\n    return 1\n# TODO: прибрати\n", encoding="utf-8")
+    (root / "pkg" / "n.txt").write_text("load_config у тексті\n", encoding="utf-8")
+    s = reg.dispatch("search", {"pattern": "load_config"}, ctx)
+    assert "pkg/m.py:1: def Load_Config():" in s and "pkg/n.txt:1:" in s, s
+    assert "pkg/n.txt" not in reg.dispatch("search", {"pattern": "load_config", "glob": "*.py"}, ctx)
+    assert "не знайдено" in reg.dispatch("search", {"pattern": "Load_config"}, ctx)        # є велика літера → з регістром
+    assert "m.py:3:" in reg.dispatch("search", {"pattern": "TODO|FIXME", "path": "pkg"}, ctx)
+    assert "як звичайний текст" in reg.dispatch("search", {"pattern": "def Load_Config(("}, ctx)
+    assert "pkg/m.py:1:" in reg.dispatch("search", {"pattern": "Load_Config("}, ctx)      # дужка без пари — як текст
+    assert "заборонено" in reg.dispatch("search", {"pattern": "x", "path": str(root.parent)}, ctx)
     from agent import limits
-    cap = limits.get().read_chars
-    got, off = "", 0
-    while off < 20000:
-        part = reg.dispatch("read_file", {"path": "big.py", "offset": off}, ctx)
-        body = part.split("]\n", 1)[1] if part.startswith("[символи") else part
-        body = body.split("\n\n…[файл триває")[0]
-        got += body
-        off += cap
-    assert got == "# c\n" * 5000, len(got)
     # REMOTE-ліміт: файл ~43k символів віддається цілком за один виклик
     limits.FORCE = limits.REMOTE
     try:
@@ -70,18 +92,21 @@ def main() -> None:
     finally:
         limits.FORCE = limits.LOCAL
 
-    # read_attachment: пагінація через offset для великих файлів
+    # вкладення в ОДИН довгий рядок (вставлений текст): частинами за символами, з підказкою автопродовження
+    from agent.agent_loop import pending_continuation
     att_dir = root / ".att"
     att_dir.mkdir()
     (att_dir / "paste.txt").write_text("x" * 70_000, encoding="utf-8")
     ctx_att = ToolContext(root=root, permissions={"edits": "auto", "shell": "allowlist"},
                           attachments_dir=att_dir)
-    p1 = reg.dispatch("read_attachment", {"name": "paste.txt"}, ctx_att)
-    assert "0-32000 з 70000" in p1 and "offset=32000" in p1, p1
-    p2 = reg.dispatch("read_attachment", {"name": "paste.txt", "offset": 32000}, ctx_att)
-    assert "32000-64000 з 70000" in p2 and "offset=64000" in p2, p2
-    p3 = reg.dispatch("read_attachment", {"name": "paste.txt", "offset": 64000}, ctx_att)
-    assert "64000-70000 з 70000" in p3 and "лишилось" not in p3, p3   # останній шматок — без "лишилось"
+    p1 = reg.dispatch("read_file", {"path": "paste.txt"}, ctx_att)
+    assert "символи 0-32000 з 70000" in p1 and "offset=32000" in p1 and "лишилось" in p1, p1[:120]
+    cont = pending_continuation([{"role": "tool", "content": p1}])
+    assert cont["function"]["arguments"] == {"path": "paste.txt", "offset": 32000}, cont
+    p2 = reg.dispatch("read_attachment", {"name": "paste.txt", "offset": 32000}, ctx_att)    # стара назва теж
+    assert "32000-64000 з 70000" in p2 and "offset=64000" in p2, p2[:120]
+    p3 = reg.dispatch("read_file", {"path": "paste.txt", "offset": 64000}, ctx_att)
+    assert "64000-70000 з 70000" in p3 and "лишилось" not in p3, p3[:120]   # останній шматок — без "лишилось"
 
     # невідомий тул
     assert "невідомий" in reg.dispatch("nope", {}, ctx)

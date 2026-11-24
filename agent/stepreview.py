@@ -22,7 +22,7 @@ from .memory import render_for_planner
 REPORT_MAX = 2400            # загальний ліміт звіту про один крок (символів)
 OUT_HEAD, OUT_TAIL = 500, 300   # скільки початку/кінця виводу команди лишаємо
 MAX_REPLANS = 3              # скільки разів за один запуск плану можна коригувати план
-READ_TOOLS = ("read_file", "list_dir", "read_attachment", "project_note")
+READ_TOOLS = ("read_file", "list_dir", "read_attachment", "project_note", "search")
 WRITE_TOOLS = ("write_file", "edit_file", "create_from_source")
 
 _RC = re.compile(r"\[код завершення:\s*(-?\d+)\]\s*$")
@@ -53,6 +53,8 @@ def facts_report(actions: list[tuple[str, dict, str]]) -> str:
             path = a.get("path") or a.get("target") or "?"
             head = (result or "").strip().splitlines()[0][:160] if (result or "").strip() else ""
             lines.append(f"✎ {name} {path}: {head}")
+        elif name == "search":
+            read.append(f"пошук «{str(a.get('pattern', ''))[:60]}»")
         elif name in READ_TOOLS:
             read.append(str(a.get("path") or a.get("name") or "."))
         elif name == "web_search":

@@ -2,6 +2,11 @@
 Запуск: .venv\\Scripts\\python.exe -m tests.test_attachments
 """
 import shutil
+import tempfile
+from pathlib import Path
+
+import agent.attachments as _A
+_A.ATTACHMENTS_ROOT = Path(tempfile.mkdtemp()) / "attachments"     # реальний профіль не чіпаємо
 
 from agent.attachments import (
     classify, process, session_dir, save, remove, clear, rename_session,
@@ -59,10 +64,10 @@ def main():
         assert ev.parent == session_dir(SID) and ev.name == "evil.py"
         remove(SID, "evil.py")
 
-        # attachments_note: імена файлів + інструкція read_attachment, без вмісту
+        # attachments_note: імена файлів + інструкція read_file/search, без вмісту
         note = attachments_note(SID, meta)
         assert "main.py" in note and "utils.py" in note
-        assert "read_attachment" in note         # стеримо модель на правильний тул
+        assert "read_file(path)" in note and "search(" in note   # стеримо модель на правильні тули
         assert "print(1)" not in note            # вмісту немає
         assert attachments_note(SID, []) == ""
         # error-файли не потрапляють у note
@@ -108,6 +113,19 @@ def main():
         assert "не знайдено" in h_read_attachment({"name": "zzz.py"}, ctx)
         # без attachments_dir → зрозуміле повідомлення
         assert "немає" in h_read_attachment({"name": "x"}, ToolContext(root=session_dir(SID2)))
+        # тепер вкладення читає звичайний read_file — за іменем (нечітко), навіть коли корінь — інша тека проєкту
+        from agent.toolkit import default_registry
+        proj = Path(tempfile.mkdtemp())
+        (proj / "a.py").write_text("A = 1\n", encoding="utf-8")
+        pctx = ToolContext(root=proj, attachments_dir=session_dir(SID2))
+        reg = default_registry()
+        assert "print(1)" in reg.dispatch("read_file", {"path": "MAIN"}, pctx)            # ім'я вкладення
+        assert "A = 1" in reg.dispatch("read_file", {"path": "a.py"}, pctx)              # файл проєкту
+        assert "print(1)" in reg.dispatch("read_file", {"path": str(session_dir(SID2) / "main.py")}, pctx)
+        miss = reg.dispatch("read_file", {"path": "zzz.py"}, pctx)
+        assert "не знайдено" in miss and "main.py" in miss                                # підказка: що є
+        assert "print(1)" in reg.dispatch("read_attachment", {"name": "main"}, pctx)      # стара назва працює
+        assert "read_attachment" not in reg.names() and "read_attachment" not in str(reg.schema())
     finally:
         clear(SID); clear(SID2)
 

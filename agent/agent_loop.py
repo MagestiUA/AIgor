@@ -113,7 +113,8 @@ def summarize_history(messages: list[dict], client, window: int = 0, keep_last: 
     return True, before, len(out)
 
 
-READ_ONLY_TOOLS = ("list_dir", "read_file", "read_attachment", "web_search", "project_note", "investigate", "recall", "remember", "recall_history")
+READ_ONLY_TOOLS = ("list_dir", "read_file", "search", "read_attachment", "web_search", "project_note", "investigate",
+                   "recall", "remember", "recall_history")
 READ_WARN = 8              # стільки читань ПІДРЯД (без жодної зміни/команди) → просимо дати висновок
 READ_FORCE = 12            # ... а стільки → примусовий висновок без тулів
 FINALIZE_TEXT = (
@@ -213,7 +214,11 @@ SYSTEM = (
     "- create_from_source(target, source, instruction): duplicate an existing file into a "
     "new file (copy + optional refactor). Copies large data literals byte-for-byte. NEVER "
     "use shell copy or read+write manually for this.\n"
-    "- read_file(path), list_dir(path): inspect files. list_dir with no path shows project root.\n"
+    "- search(pattern, path, glob): find lines in files by text or regex (returns path:line: text). Use it to LOCATE "
+    "code instead of reading whole files and instead of grep/Select-String in run_shell.\n"
+    "- read_file(path, start_line, limit): read a file (or an attached file by its name). Big files come in line "
+    "chunks; after search, read only the needed place, e.g. read_file('a.py', start_line=120, limit=40). "
+    "list_dir(path) shows the tree; with no path — project root.\n"
     "- run_shell(command): run programs — python, pip, pytest, git, etc. cwd=project root. "
     "Use for: 'python -m venv .venv', 'pip install -r requirements.txt', 'pytest', etc. "
     "For venv pip use: '.venv\\Scripts\\pip install ...' (Windows) or '.venv/bin/pip install ...' (Linux). "
@@ -434,19 +439,20 @@ def _looks_like_leaked_reasoning(body: str) -> bool:
     return sum(body.count(m) for m in _LEAK_REASONING_MARKERS) >= 3
 
 
-# Останній read_attachment повертає явну підказку "лишилось N символів, виклич
-# read_attachment(name='X', offset=N)" (toolkit.h_read_attachment). Якщо модель після
+# Останнє читання ВКЛАДЕННЯ частинами повертає явну підказку "лишилось N рядків. Щоб продовжити, виклич
+# read_file(path='X', start_line=N)" (toolkit.CONTINUE_HINT — лише для вкладень). Якщо модель після
 # цього НЕ зробила той виклик, а написала прозою щось типу "продовжую читати" — текстовий
 # nudge тут НЕ зарадить: живцем бачили модель, що 15+ разів підряд повторює ТОЧНО ту саму
-# фразу, ігноруючи nudge. Маємо вже все потрібне (ім'я файлу + offset) з власної ж
+# фразу, ігноруючи nudge. Маємо вже все потрібне (ім'я файлу + рядок) з власної ж
 # підказки — тож ВИКОНУЄМО продовження самі, без участі моделі: гарантований прогрес
 # замість сподівання на співпрацю.
-_PENDING_CONTINUATION_RE = re.compile(r"read_attachment\(name='([^']+)',\s*offset=(\d+)\)\]\s*$")
+_PENDING_CONTINUATION_RE = re.compile(
+    r"лишилось \d+ (?:рядків|символів)\. Щоб продовжити, виклич read_file\(path='([^']+)', (start_line|offset)=(\d+)\)\]\s*$")
 
 
 def pending_continuation(messages: list[dict]) -> dict | None:
-    """Якщо останній РЕАЛЬНИЙ tool-результат в історії містить незавершену пагінацію
-    read_attachment — повертає синтетичний tool_call (той самий формат, що й
+    """Якщо останній РЕАЛЬНИЙ tool-результат в історії містить незавершене читання
+    вкладення частинами — повертає синтетичний tool_call (той самий формат, що й
     recover_tool_calls) для автопродовження. Йдемо назад, пропускаючи власні
     nudge-повідомлення ('user') — інакше після ПЕРШОГО nudge перевірка вже не бачить
     tool-результат і мовчки здається."""
@@ -456,8 +462,8 @@ def pending_continuation(messages: list[dict]) -> dict | None:
             match = _PENDING_CONTINUATION_RE.search((m.get("content") or "").strip())
             if not match:
                 return None
-            return {"function": {"name": "read_attachment",
-                                 "arguments": {"name": match.group(1), "offset": int(match.group(2))}}}
+            return {"function": {"name": "read_file",
+                                 "arguments": {"path": match.group(1), match.group(2): int(match.group(3))}}}
         if role == "user":
             continue   # пропускаємо власні nudge-репліки, шукаємо далі назад
         return None   # assistant (реальний виклик уже відбувся) чи system — не pending

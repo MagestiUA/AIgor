@@ -18,13 +18,14 @@ from . import logs
 from .literals import mask_long
 from .toolkit import Tool, ToolContext, ToolRegistry, default_registry
 
-READ_ONLY = ("list_dir", "read_file", "read_attachment", "web_search")
+READ_ONLY = ("list_dir", "search", "read_file", "web_search")
 MAX_ITERS = 12            # бюджет читань субагента (далі — примусовий висновок)
 REPORT_MAX = 1800
 
 SYSTEM = (
-    "You are a RESEARCH sub-agent. You only READ: list_dir, read_file, read_attachment, web_search. You cannot "
-    "change files or run commands. Investigate the task you are given, then reply with a SHORT conclusion "
+    "You are a RESEARCH sub-agent. You only READ: search (find lines by text/regex — use it FIRST to locate code), "
+    "read_file (read a file or an attached file; read only the needed lines with start_line/limit), list_dir, "
+    "web_search. You cannot change files or run commands. Investigate the task you are given, then reply with a SHORT conclusion "
     "(max ~1500 characters): what you found, exact file paths and function/line names, and what the caller "
     "should do next. Rules: never paste long values (tokens, keys, base64, big strings, data arrays) - give "
     "the file path and where to find them instead; do not paste whole files, quote only the few key lines. "
@@ -33,13 +34,7 @@ SYSTEM = (
 
 
 def readonly_registry() -> ToolRegistry:
-    full = default_registry()
-    r = ToolRegistry()
-    for name in READ_ONLY:
-        t = full._tools.get(name)
-        if t:
-            r.register(t)
-    return r
+    return default_registry().subset(READ_ONLY)
 
 
 def _clip_report(text: str) -> str:
@@ -60,7 +55,7 @@ def investigate(task: str, ctx: ToolContext, client=None, max_iters: int = MAX_I
 
     class _Hooks(LoopHooks):
         async def dispatch(self, registry, name, args, ctx_):
-            if name not in READ_ONLY:
+            if registry.visible_for(name) not in READ_ONLY:
                 return f"тул {name} недоступний субагенту (лише читання)"
             return await super().dispatch(registry, name, args, ctx_)
 
@@ -86,8 +81,8 @@ def h_investigate(args, ctx):
 
 INVESTIGATE_TOOL = Tool(
     "investigate",
-    "Доручити ДОСЛІДЖЕННЯ окремому субагенту з чистим контекстом (лише читання: list_dir, read_file, "
-    "read_attachment, web_search). Використовуй, коли треба прочитати багато файлів чи розібратись у коді/логах "
+    "Доручити ДОСЛІДЖЕННЯ окремому субагенту з чистим контекстом (лише читання: search, read_file, list_dir, "
+    "web_search). Використовуй, коли треба прочитати багато файлів чи розібратись у коді/логах "
     "перед правкою: у твій контекст прийде лише короткий висновок (шляхи, функції, що робити), а не сирий "
     "вміст. Сам субагент нічого не змінює — правки й команди виконуєш ти. Задай конкретне питання.",
     {"task": {"type": "string", "description": "що з'ясувати (конкретно: де шукати, що саме потрібно знати)"}},

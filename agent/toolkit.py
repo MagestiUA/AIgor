@@ -46,12 +46,30 @@ class Tool:
 class ToolRegistry:
     def __init__(self):
         self._tools: dict[str, Tool] = {}
+        # Тули лише для сумісності (стара назва -> тул, що її замінив): модель могла бачити стару назву в історії чи
+        # підказках — виклик виконується, але в схемі й names() таких тулів нема.
+        self._hidden: dict[str, str] = {}
 
-    def register(self, tool: Tool) -> None:
+    def register(self, tool: Tool, compat_for: str = "") -> None:
         self._tools[tool.name] = tool
+        if compat_for:
+            self._hidden[tool.name] = compat_for
+
+    def visible_for(self, name: str) -> str:
+        """Назва тулу, яку бачить модель: для прихованого тулу сумісності — його замінник."""
+        return self._hidden.get(name, name)
 
     def names(self) -> list[str]:
-        return list(self._tools)
+        return [n for n in self._tools if n not in self._hidden]
+
+    def subset(self, names) -> "ToolRegistry":
+        """Реєстр лише з цими тулами (+ приховані тули сумісності, якщо їхній замінник лишився)."""
+        r = ToolRegistry()
+        keep = set(names)
+        for n, t in self._tools.items():
+            if n in keep or self._hidden.get(n) in keep:
+                r.register(t, compat_for=self._hidden.get(n, ""))
+        return r
 
     def schema(self) -> list[dict]:
         """Формат Ollama tools=[...]."""
@@ -62,7 +80,7 @@ class ToolRegistry:
                 "parameters": {"type": "object", "properties": t.parameters,
                                "required": t.required},
             },
-        } for t in self._tools.values()]
+        } for t in self._tools.values() if t.name not in self._hidden]
 
     def dispatch(self, name: str, args: dict, ctx: ToolContext) -> str:
         log = logs.get("tools")
@@ -130,11 +148,47 @@ def _resolve(ctx: ToolContext, path: str) -> Path:
     root = ctx.root.resolve()
     p = Path(path)
     full = (p if p.is_absolute() else root / p).resolve()
-    from .spill import SPILL_ROOT
-    for base in [root, *(Path(x).resolve() for x in ctx.extra_roots), SPILL_ROOT.resolve()]:   # корінь + додані теки + виводи тулів
+    for base in [root, *(Path(x).resolve() for x in ctx.extra_roots), *_aux_roots(ctx)]:   # корінь + додані теки + службові
         if full == base or base in full.parents:
             return full
     raise ValueError(f"шлях поза межами проєкту заборонено: {path}")
+
+
+def _aux_roots(ctx) -> list[Path]:
+    """Службові теки, які модель може читати за повним шляхом: повні виводи тулів (spill) і вкладення цього чату."""
+    from .spill import SPILL_ROOT
+    out = [SPILL_ROOT.resolve()]
+    if getattr(ctx, "attachments_dir", None):
+        out.append(Path(ctx.attachments_dir).resolve())
+    return out
+
+
+def _attachment_files(ctx) -> list[Path]:
+    d = getattr(ctx, "attachments_dir", None)
+    if not d or not Path(d).is_dir():
+        return []
+    from .images import is_image_name
+    return sorted(p for p in Path(d).iterdir() if p.is_file() and not is_image_name(p.name))
+
+
+def _find_attachment(ctx, name: str) -> Path | None:
+    """Вкладення за іменем, прощаючи неточності довгого імені: точне → без регістру → підрядок."""
+    files = _attachment_files(ctx)
+    q = Path((name or "").strip()).name
+    if not q or not files:
+        return None
+    exact = next((p for p in files if p.name == q), None)
+    if exact:
+        return exact
+    ql = q.lower()
+    cand = ([p for p in files if p.name.lower() == ql] or [p for p in files if ql in p.name.lower()]
+            or [p for p in files if p.name.lower() in ql])
+    return cand[0] if cand else None
+
+
+def _is_attachment(ctx, p: Path) -> bool:
+    d = getattr(ctx, "attachments_dir", None)
+    return bool(d) and Path(d).resolve() in p.resolve().parents
 
 
 def _under_root(ctx: ToolContext, path: str) -> bool:
@@ -152,75 +206,129 @@ def h_list_dir(args, ctx):
     return scan_structure(_resolve(ctx, args.get("path", ".")))
 
 
-def h_read_file(args, ctx):
-    p = _resolve(ctx, args.get("path", ""))
-    if not p.is_file():
-        return f"файл не знайдено: {args.get('path')}"
-    text = T.text_for_model(T.read_file(p))
-    cap = limits.get().read_chars
+def _int(v, default: int = 0) -> int:
     try:
-        offset = max(0, int(args.get("offset") or 0))
+        return int(v)
     except (TypeError, ValueError):
-        offset = 0
-    if len(text) <= cap and offset == 0:
-        return text
+        return default
+
+
+# Підказка автопродовження для ВКЛАДЕНЬ (agent_loop.pending_continuation дочитує їх сам, якщо модель зупинилась):
+# лише для вкладень — частково прочитаний файл коду модель могла читати навмисно (start_line/limit).
+CONTINUE_HINT = "лишилось {left} рядків. Щоб продовжити, виклич read_file(path='{label}', start_line={nxt})"
+CONTINUE_HINT_CHARS = "лишилось {left} символів. Щоб продовжити, виклич read_file(path='{label}', offset={nxt})"
+
+
+def _locate(ctx, raw: str) -> tuple[Path | None, str, str]:
+    """Знайти файл для read_file -> (шлях, мітка для моделі, помилка). Порядок: шлях у проєкті/дозволених теках →
+    вкладення за іменем (нечітко). Шлях поза дозволеними теками — помилка «поза межами» (якщо це не ім'я вкладення)."""
+    err = ""
+    try:
+        p = _resolve(ctx, raw)
+        if p.is_file():
+            return p, (p.name if _is_attachment(ctx, p) else raw), ""
+    except ValueError as e:
+        err = str(e)
+    att = _find_attachment(ctx, raw)
+    if att is not None:
+        return att, att.name, ""
+    if err:
+        return None, raw, err
+    names = ", ".join(p.name for p in _attachment_files(ctx))
+    return None, raw, f"файл не знайдено: {raw}" + (f". Прикріплені файли: {names}" if names else "")
+
+
+def _read_by_chars(text: str, label: str, offset: int, cap: int, att: bool = False) -> str:
+    """Читання за позицією в СИМВОЛАХ (offset): для рядків, довших за ліміт (вставлений текст в один рядок,
+    мініфіковані файли). Для вкладень — та сама підказка «лишилось…», яку pending_continuation дочитує сам."""
     chunk = text[offset:offset + cap]
     end = offset + len(chunk)
+    head = f"[{label}: символи {offset}-{end} з {len(text)}]"
     if end >= len(text):
-        return f"[символи {offset}-{end} з {len(text)}, кінець файлу]\n{chunk}"
-    # Живий кейс (Cerberus3): без offset модель не могла дочитати файл у 43k символів і
-    # витрачала увесь ліміт ітерацій на `python -c "print(s[a:b])"` через run_shell.
-    return (f"[символи {offset}-{end} з {len(text)}]\n{chunk}\n\n…[файл триває. Щоб "
-            f"продовжити — read_file(path, offset={end}). НЕ копіюй вміст вручну — для "
-            "дублювання у новий файл клич create_from_source, для зміни на місці — edit_file "
-            "(вони зберігають великі дані-літерали байт-у-байт).]")
+        return f"{head}\n{chunk}"
+    if att:
+        return f"{head}\n{chunk}\n\n…[" + CONTINUE_HINT_CHARS.format(left=len(text) - end, label=label, nxt=end) + "]"
+    return f"{head}\n{chunk}\n\n…[далі: read_file(path='{label}', offset={end})]"
 
 
-# Розмір шматка на один read_attachment-виклик. На num_ctx=131072 з резервом
-# ~20k токенів на system/tools/історію/відповідь лишається ~110k токенів ≈ 275k
-# символів (кирилиця ~2.5 симв./токен) на сам вміст в одній розмові — тобто
-# 32000 далеко не межа контексту; це баланс "менше раундів" (386KB → ~12 читань
-# замість 48 по 8000) проти "лишити моделі простір подумати над шматком".
-ATTACHMENT_CHUNK_SIZE = 32_000
+def h_read_file(args, ctx):
+    """Прочитати файл проєкту або вкладення. Маленький файл — цілком і як є; великий — частинами за РЯДКАМИ
+    (start_line з 1, limit — скільки рядків) із заголовком «рядки a-b з N» і підказкою, як читати далі.
+    Рядкові номери узгоджені з тулом search (шлях:рядок), тож модель читає лише потрібне місце."""
+    raw = str(args.get("path") or args.get("name") or "").strip()
+    if not raw:
+        return "помилка: не вказано path для read_file"
+    p, label, err = _locate(ctx, raw)
+    if p is None:
+        return err
+    att = _is_attachment(ctx, p)
+    text = T.text_for_model(T.read_file(p))
+    cap = limits.get().chunk if att else limits.get().read_chars
+    start, limit = max(1, _int(args.get("start_line"), 1)), max(0, _int(args.get("limit")))
+    if args.get("offset") and not args.get("start_line"):
+        return _read_by_chars(text, label, max(0, _int(args.get("offset"))), cap, att)
+    if start == 1 and not limit and len(text) <= cap:
+        return f"=== {label} ===\n{text}" if att else text
+    lines = text.split("\n")
+    total = len(lines) - (1 if text.endswith("\n") else 0)
+    if start > max(total, 1):
+        return f"[{label}: у файлі лише {total} рядків]"
+    out, used, i = [], 0, start - 1
+    while i < total and (not limit or len(out) < limit):
+        ln = lines[i]
+        if out and used + len(ln) + 1 > cap:
+            break
+        if not out and len(ln) > cap:                       # один рядок довший за ліміт — далі читаємо за символами
+            return _read_by_chars(text, label, sum(len(x) + 1 for x in lines[:i]), cap, att)
+        out.append(ln)
+        used += len(ln) + 1
+        i += 1
+    end = start - 1 + len(out)
+    body = "\n".join(out)
+    head = f"[{label}: рядки {start}-{end} з {total}]"
+    if end >= total:
+        return f"{head}\n{body}"
+    left = total - end
+    if att and not limit:
+        tail = "\n\n…[" + CONTINUE_HINT.format(left=left, label=label, nxt=end + 1) + "]"
+    elif not limit:
+        # Живий кейс (Cerberus3): не маючи як дочитати файл, модель витрачала ітерації на `python -c "print(s[a:b])"`.
+        tail = (f"\n\n…[файл триває (ще {left} рядків): read_file(path='{label}', start_line={end + 1}); знайти місце — "
+                "search(pattern, path). НЕ копіюй вміст вручну — для дублювання у новий файл клич create_from_source, "
+                "для зміни на місці — replace_in_file або edit_file (вони зберігають великі дані-літерали байт-у-байт).]")
+    else:
+        tail = f"\n…[далі ще {left} рядків: read_file(path='{label}', start_line={end + 1})]"
+    return f"{head}\n{body}{tail}"
+
+
+def h_search(args, ctx):
+    from .search import search
+    raw = str(args.get("path") or "").strip()
+    try:
+        base = _resolve(ctx, raw) if raw else ctx.root.resolve()
+    except ValueError as e:
+        return str(e)
+    ic = args.get("ignore_case")
+    ic = None if ic in (None, "") else (str(ic).lower() not in ("false", "0", "no"))
+    return search(base, str(args.get("pattern") or ""), str(args.get("glob") or ""), ic, rel_to=ctx.root)
 
 
 def h_read_attachment(args, ctx):
-    """Прочитати прикріплений користувачем файл за іменем (нечіткий пошук у теці
-    вкладень сесії). Прощає неточності в довгому імені — exact → ci → підрядок.
-    offset — позиція в символах, з якої читати (для великих файлів читай частинами:
-    кожен виклик повертає ATTACHMENT_CHUNK_SIZE символів і явно каже, який offset
-    передати в НАСТУПНОМУ виклику, поки файл не дочитано)."""
-    d = ctx.attachments_dir
-    if not d or not Path(d).is_dir():
+    """Старий тул read_attachment (тепер вкладення читає read_file за іменем). Лишається як псевдонім для викликів зі
+    старої історії/підказок: шукає САМЕ серед вкладень."""
+    if not _attachment_files(ctx):
         return "немає прикріплених файлів"
-    files = [p for p in Path(d).iterdir() if p.is_file()]
-    if not files:
-        return "немає прикріплених файлів"
-    q = Path((args.get("name") or "").strip()).name      # лише базове ім'я
-    match = next((p for p in files if p.name == q), None)
-    if not match and q:
-        ql = q.lower()
-        cand = ([p for p in files if p.name.lower() == ql]
-                or [p for p in files if ql in p.name.lower()]
-                or [p for p in files if p.name.lower() in ql])
-        match = cand[0] if cand else None
-    if not match:
-        names = ", ".join(p.name for p in files)
-        return f"файл '{q}' не знайдено серед вкладень. Доступні: {names}"
-    text = T.text_for_model(T.read_file(match))
-    chunk_size = limits.get().chunk
-    try:
-        offset = max(0, int(args.get("offset") or 0))
-    except (TypeError, ValueError):
-        offset = 0
-    total = len(text)
-    chunk = text[offset:offset + chunk_size]
-    end = offset + len(chunk)
-    header = f"=== {match.name} ({offset}-{end} з {total}) ===" if total > chunk_size else f"=== {match.name} ==="
-    if end < total:
-        chunk += (f"\n\n…[лишилось {total - end} символів. Щоб продовжити, виклич "
-                  f"read_attachment(name='{match.name}', offset={end})]")
-    return f"{header}\n{chunk}"
+    q = str(args.get("name") or args.get("path") or "").strip()
+    match = _find_attachment(ctx, q)
+    if match is None:
+        names = ", ".join(p.name for p in _attachment_files(ctx))
+        return f"файл '{Path(q).name}' не знайдено серед вкладень. Доступні: {names}"
+    a = {"path": str(match)}
+    if args.get("start_line"):
+        a["start_line"] = args["start_line"]
+    elif args.get("offset"):
+        a["offset"] = args["offset"]
+    return h_read_file(a, ctx)
 
 
 def h_read_topic(args, ctx):
@@ -374,30 +482,32 @@ def default_registry() -> ToolRegistry:
     r.register(Tool("list_dir", "Показати структуру файлів проєкту.",
                     {"path": {"type": "string", "description": "тека, типово корінь"}},
                     [], h_list_dir))
-    r.register(Tool("read_file", "Прочитати вміст файлу (великі — частинами через offset).",
-                    {"path": {"type": "string"},
-                     "offset": {"type": "integer",
-                                "description": "позиція в символах, з якої читати (за замовчуванням 0)"}},
+    r.register(Tool("read_file",
+                    "Прочитати файл проєкту АБО прикріплений користувачем файл (для вкладення достатньо імені, можна "
+                    "неточного). Невеликий файл повертається цілком; великий — частинами за рядками з заголовком "
+                    "«рядки a-b з N» і підказкою, як читати далі. Щоб прочитати лише потрібне місце, спершу знайди його "
+                    "тулом search, потім read_file(path, start_line=N, limit=40).",
+                    {"path": {"type": "string", "description": "шлях до файлу або ім'я вкладення"},
+                     "start_line": {"type": "integer", "description": "з якого рядка читати (з 1)"},
+                     "limit": {"type": "integer", "description": "скільки рядків прочитати (типово — скільки вміститься)"}},
                     ["path"], h_read_file))
+    r.register(Tool("search",
+                    "Знайти рядки у файлах за текстом або регулярним виразом (замість grep/Select-String у консолі). "
+                    "Повертає «шлях:рядок: текст». Без великих літер у шаблоні регістр не враховується.",
+                    {"pattern": {"type": "string", "description": "текст або регулярний вираз (напр. 'def load_', 'TODO|FIXME')"},
+                     "path": {"type": "string", "description": "тека чи файл, де шукати (типово — корінь проєкту)"},
+                     "glob": {"type": "string", "description": "фільтр файлів, напр. '*.py' або '*.ts,*.tsx'"},
+                     "ignore_case": {"type": "boolean", "description": "true/false — примусово (типово: розумний регістр)"}},
+                    ["pattern"], h_search))
     r.register(Tool("project_note",
                     "Записати/оновити коротку нотатку про файл у «Карті проєкту» (навіщо файл, де що шукати). "
                     "Викликай, коли побачив, що опис файлу застарів або ти зрозумів, що він робить. Лише ПРО "
                     "файл проєкту; сам проєкт не змінюється.",
                     {"path": {"type": "string"}, "note": {"type": "string", "description": "1–2 речення"}},
                     ["path", "note"], h_project_note))
-    r.register(Tool("read_attachment",
-                    "Прочитати файл, ПРИКРІПЛЕНИЙ користувачем до повідомлення. Передай "
-                    "ім'я файлу зі списку прикріплених (можна частину імені — пошук "
-                    "нечіткий). Використовуй ЦЕ замість read_file для вкладень. Великі "
-                    "файли повертаються частинами (~32000 символів) — якщо у відповіді "
-                    "є позначка 'лишилось N символів... offset=X', виклич знову з тим "
-                    "offset, щоб дочитати решту.",
-                    {"name": {"type": "string", "description": "ім'я прикріпленого файлу"},
-                     "offset": {"type": "integer",
-                                "description": "з якого символу читати (0 — спочатку); "
-                                                "брати зі значення offset у позначці "
-                                                "'лишилось...' попереднього виклику"}},
-                    ["name"], h_read_attachment))
+    # read_attachment зведено в read_file (вкладення читаються за іменем); назва лишається прихованим тулом для старих викликів
+    r.register(Tool("read_attachment", "", {"name": {"type": "string"}}, ["name"], h_read_attachment),
+               compat_for="read_file")
     r.register(Tool("write_file",
                     "Створити або перезаписати файл із заданим вмістом. "
                     "Батьківські директорії створюються АВТОМАТИЧНО — не потрібно окремо "
