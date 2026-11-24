@@ -116,7 +116,7 @@ def _track_project(name: str, args: dict, out: str, ctx) -> None:
             return
         if name == "read_file" and args.get("path"):
             projectmap.mark_read(ctx.root, args["path"])
-        elif name in ("write_file", "edit_file") and args.get("path"):
+        elif name in ("write_file", "edit_file", "replace_in_file") and args.get("path"):
             projectmap.refresh_file(ctx.root, args["path"])
         elif name == "create_from_source" and args.get("target"):
             projectmap.refresh_file(ctx.root, args["target"])
@@ -413,6 +413,50 @@ def _apply_or_reject(res, path, ctx, made: str) -> str:
     return f"відхилено. diff:\n{res.diff}"
 
 
+def h_replace_in_file(args, ctx):
+    """Пряма точкова заміна (як Edit у Claude Code / str_replace): модель дає точний наявний фрагмент і заміну — ми
+    застосовуємо самі, БЕЗ вкладеного виклику моделі з усім файлом (edit_file). Точний збіг має бути єдиним; якщо його
+    нема — пробуємо збіг цілих рядків без урахування відступів по краях (patching.apply_block) і даємо підказку.
+    Для .py результат мусить компілюватися (якщо оригінал компілювався); стиль (CRLF, таби) — як в оригіналі."""
+    from . import patching
+    from .executor import EditResult
+    rel = str(args.get("path") or "").strip()
+    if not rel:
+        return "помилка: не вказано path для replace_in_file"
+    p = _resolve(ctx, rel)
+    if not p.is_file():
+        return f"файл не знайдено: {rel} (новий файл створюй write_file)"
+    old, new = T.text_for_model(str(args.get("old") or "")), T.text_for_model(str(args.get("new") or ""))
+    if not old.strip():
+        return "помилка: old порожній — вкажи точний наявний фрагмент (дописати в кінець чи створити файл — write_file/edit_file)"
+    if old == new:
+        return "помилка: old і new однакові — нічого не змінено"
+    original = T.read_file(p)
+    body = T.text_for_model(original)
+    n = body.count(old)
+    if n > 1:
+        return f"помилка: фрагмент old трапляється {n} разів — додай 1–3 сусідні рядки, щоб він був єдиним"
+    if n == 1:
+        result = body.replace(old, new, 1)
+    else:
+        o = old[:-1] if old.endswith("\n") else old
+        w = new[:-1] if new.endswith("\n") and old.endswith("\n") else new
+        lines, why = patching.apply_block(body.split("\n"), patching.Block(o.split("\n"), w.split("\n") if w else []),
+                                          T.detect_indent(body))
+        if lines is None:
+            return ("помилка: old не знайдено у файлі (скопіюй фрагмент ТОЧНО з read_file, без номерів рядків). " + why
+                    ).replace("SEARCH не знайдено у файлі.", "").strip()
+        result = "\n".join(lines)
+    if str(p).lower().endswith((".py", ".pyw")) and T.validate_python(body)[0]:
+        ok, err = T.validate_python(result)
+        if not ok:
+            return f"помилка: після заміни синтаксична помилка ({err}). Файл не змінено — виправ new."
+    final, note = T.match_style(original, result, p.name)
+    res = EditResult(True, final, T.unified_diff(original, final, p.name), "", None)
+    out = _apply_or_reject(res, p, ctx, "замінено в")
+    return out + (f"\n[{note}]" if note and not out.startswith(("помилка", "відхилено")) else "")
+
+
 def h_edit_file(args, ctx):
     p = _resolve(ctx, args.get("path", ""))
     if not p.is_file():
@@ -522,10 +566,19 @@ def default_registry() -> ToolRegistry:
                     "копіювання файлів — для цього є write_file і create_from_source.",
                     {"command": {"type": "string", "description": "команда для виконання"}},
                     ["command"], h_run_shell))
+    r.register(Tool("replace_in_file",
+                    "Точкова заміна у наявному файлі: old — ТОЧНИЙ поточний фрагмент (скопіюй з read_file кілька рядків, "
+                    "щоб він був єдиним у файлі), new — на що його замінити (порожній — видалити). Найшвидший і "
+                    "найнадійніший спосіб змінити кілька рядків, коли ти бачив актуальний текст. Відступи й закінчення "
+                    "рядків файлу зберігаються.",
+                    {"path": {"type": "string"},
+                     "old": {"type": "string", "description": "точний наявний фрагмент"},
+                     "new": {"type": "string", "description": "новий текст на його місці"}},
+                    ["path", "old", "new"], h_replace_in_file))
     r.register(Tool("edit_file",
-                    "Змінити наявний файл за інструкцією: модель вносить ТОЧКОВІ правки (лише змінені "
-                    "фрагменти), решта файлу не чіпається; великі дані-літерали зберігаються автоматично. "
-                    "У instruction чітко вкажи ЩО й ДЕ (функція/клас/рядок) змінити.",
+                    "Змінити наявний файл за інструкцією словами: окрема модель вносить ТОЧКОВІ правки (лише змінені "
+                    "фрагменти), решта файлу не чіпається; великі дані-літерали зберігаються автоматично. Для великих "
+                    "змін або коли ти не бачив актуального тексту. У instruction чітко вкажи ЩО й ДЕ (функція/клас/рядок).",
                     {"path": {"type": "string"}, "instruction": {"type": "string"}},
                     ["path", "instruction"], h_edit_file))
     r.register(Tool("create_from_source",

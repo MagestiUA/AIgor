@@ -86,15 +86,43 @@ def hint(lines: list[str], search: list[str]) -> str:
     return "Схоже місце у файлі (скопіюй рядки ТОЧНО):\n" + "\n".join(f"{j + 1}| {lines[j]}" for j in range(lo, hi))
 
 
+def _lead(s: str) -> int:
+    return len(s) - len(s.lstrip(" \t"))
+
+
+def _reindent_like(found: list[str], search: list[str], rep: list[str]) -> list[str]:
+    """Збіг знайдено БЕЗ урахування відступів: перенести на заміну ту саму різницю відступів, що між SEARCH моделі й
+    файлом (як Aider). Сталий зсув (модель загубила рівень вкладеності) або сталий масштаб (2 пробіли замість 4);
+    якщо різниця непослідовна — заміну не чіпаємо."""
+    pairs = [(_lead(f), _lead(s)) for f, s in zip(found, search) if s.strip()]
+    if not pairs or all(a == b for a, b in pairs):
+        return rep
+    ch = "\t" if any(f[:1] == "\t" for f in found) else " "
+    deltas = {a - b for a, b in pairs}
+    if len(deltas) == 1:
+        d = deltas.pop()
+        if d > 0:
+            return [ch * d + r if r.strip() else r for r in rep]
+        return [r[min(-d, _lead(r)):] if r.strip() else r for r in rep]
+    nz = [(a, b) for a, b in pairs if b]
+    if nz and all(a == 0 for a, b in pairs if not b):
+        k = nz[0][0] / nz[0][1]
+        if k > 0 and all(abs(a - b * k) < 1e-9 for a, b in nz):
+            return [ch * round(_lead(r) * k) + r.lstrip(" \t") if r.strip() else r for r in rep]
+    return rep
+
+
 def apply_block(lines: list[str], block: Block, style: str | None = None) -> tuple[list[str] | None, str]:
     """(нові_рядки, "") або (None, причина). lines не змінюється."""
     rep = _fit_indent(block.replace, style)
     if not block.search:                              # дописати в кінець
         return lines + rep, ""
-    for norm in (lambda x: x, lambda x: x.strip()):   # точно, потім — без відступів по краях
+    for exact, norm in ((True, lambda x: x), (False, lambda x: x.strip())):   # точно, потім — без відступів по краях
         hits = _find(lines, block.search, norm)
         if len(hits) == 1:
             i = hits[0]
+            if not exact:
+                rep = _reindent_like(lines[i:i + len(block.search)], _fit_indent(block.search, style), rep)
             return lines[:i] + rep + lines[i + len(block.search):], ""
         if len(hits) > 1:
             return None, (f"SEARCH трапляється {len(hits)} разів — додай 1–3 сусідні рядки, "

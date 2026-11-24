@@ -24,6 +24,8 @@ def summarize_args(name: str, args: dict, n: int = 400) -> str:
         s = f"«{a.get('pattern', '')}»" + (f" у {a['path']}" if a.get("path") else "") + (f" [{a['glob']}]" if a.get("glob") else "")
     elif name == "write_file":
         s = f"{a.get('path', '')}  ({len(a.get('content', '') or '')} симв.)"
+    elif name == "replace_in_file":
+        s = f"{a.get('path', '')}  (−{len(str(a.get('old') or ''))} / +{len(str(a.get('new') or ''))} симв.)"
     elif name in ("edit_file", "create_from_source"):
         s = f"{a.get('path') or a.get('target', '')} — {str(a.get('instruction', ''))[:120]}"
     elif name == "web_search":

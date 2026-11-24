@@ -84,7 +84,7 @@ def is_big_plan(state, threshold: int = BIG_PLAN_STEPS) -> bool:
 # ── C: що змінили кроки і чи це живе ────────────────────────────────────────
 def touched_paths(name: str, args: dict) -> list[str]:
     a = args or {}
-    if name in ("write_file", "edit_file"):
+    if name in ("write_file", "edit_file", "replace_in_file"):
         return [a["path"]] if a.get("path") else []
     if name == "create_from_source":
         return [a["target"]] if a.get("target") else []

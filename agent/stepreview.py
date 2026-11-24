@@ -23,7 +23,7 @@ REPORT_MAX = 2400            # загальний ліміт звіту про �
 OUT_HEAD, OUT_TAIL = 500, 300   # скільки початку/кінця виводу команди лишаємо
 MAX_REPLANS = 3              # скільки разів за один запуск плану можна коригувати план
 READ_TOOLS = ("read_file", "list_dir", "read_attachment", "project_note", "search")
-WRITE_TOOLS = ("write_file", "edit_file", "create_from_source")
+WRITE_TOOLS = ("write_file", "edit_file", "replace_in_file", "create_from_source")
 
 _RC = re.compile(r"\[код завершення:\s*(-?\d+)\]\s*$")
 

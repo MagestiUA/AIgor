@@ -1816,7 +1816,7 @@ class State(rx.State):
 
         parts: list[str] = []
         for name, result in actions:
-            if name in ("edit_file", "create_from_source"):
+            if name in ("edit_file", "create_from_source", "replace_in_file"):
                 parts.append(f"**{name}**\n```diff\n{result}\n```")
             elif name == "run_shell":
                 parts.append(f"**run_shell**\n```\n{result}\n```")
