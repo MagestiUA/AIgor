@@ -34,10 +34,7 @@ from agent import logs
 from agent import chat_projects as CP
 from agent import session as sess
 from agent import topics
-from agent.agent_loop import (is_incomplete, _estimate_iters, NUDGE_TEXT, pending_continuation,
-                              recover_tool_calls, should_nudge,
-                              _looks_like_leaked_reasoning,
-                              extract_intended_attachments)
+from agent.agent_loop import is_incomplete, _estimate_iters, _looks_like_leaked_reasoning
 from agent.agent_loop import summarize_history
 from agent.steploop import LoopHooks
 from agent.answerer import build_context
@@ -319,6 +316,48 @@ class _UIHooks(LoopHooks):
 
     async def checkpoint(self, actions):
         return await self._checkpoint(actions) if self._checkpoint else None
+
+
+class _ReadHooks(_UIHooks):
+    """Хуки ядра циклу для режимів чату й аналізу (лише читання): стрім відповіді з роздумами (сильна модель), дайджест
+    ВЕЛИКИХ вкладень, кожен виклик тулу — рядок у чаті (як і раніше), стоп — за поточною стоп-подією чату."""
+
+    def __init__(self, state, cid: str, client, stream: bool, digest_profile: dict):
+        super().__init__(state, cid)
+        self.client, self.stream, self.digest_profile = client, stream, digest_profile
+        self.last_thinking = ""
+        self.digest_memory: dict[str, str] = {}
+
+    def should_stop(self) -> bool:
+        ev = _STOP_EVENTS.get(self.cid)        # подію могли створити вже після старту (кнопка «Стоп») — беремо поточну
+        return ev is not None and ev.is_set()
+
+    async def call_llm(self, client, messages, tools, profile):
+        if not self.stream:
+            return await super().call_llm(client, messages, tools, profile)
+        body, thinking, calls = await self.st._run_stream(client.chat_stream(messages, tools=tools, profile=profile),
+                                                          keep_stop=True)
+        self.last_thinking = thinking
+        out = {"role": "assistant", "content": body}
+        if calls:
+            out["tool_calls"] = calls
+        return out
+
+    async def dispatch(self, registry, name, args, ctx):
+        label = str(args.get("path") or args.get("name") or args.get("pattern") or args.get("query") or name)
+        async with self.st:
+            self.st.status = f"{name}: {label}"[:60]
+        result = await self.st._dispatch_tool(registry, name, args, ctx)
+        shown = result
+        att = self.st._needs_digest(ctx, name, result)
+        if att:
+            async with self.st:
+                self.st.status = f"Узагальнюю прочитане ({att})…"
+            shown = await self.st._digest_attachment_chunk(att, result, self.digest_memory, self.client,
+                                                          self.digest_profile)
+        async with self.st:
+            self.st._append("assistant", f"🔧 {name} · {label}", "step", thinking=shown)
+        return shown
 
 
 class State(rx.State):
@@ -1835,10 +1874,11 @@ class State(rx.State):
             self._append("assistant", content, "step", thinking=log_md)
         return final, log
 
-    async def _run_stream(self, gen):
+    async def _run_stream(self, gen, keep_stop: bool = False):
         """Прокрутити стрім із живим лічильником токенів. Повідомлення НЕ додає —
         повертає (body, thinking, tool_calls). Спільне для answer і chat-режиму.
-        Підтримує переривання через _STOP_EVENTS[current_id]."""
+        Підтримує переривання через _STOP_EVENTS[current_id]. keep_stop=True (стрім усередині циклу з тулами) — стоп-подію
+        не прибираємо: її має побачити й сам цикл, інакше «Стоп» зупиняв би лише поточний стрім, а цикл ішов би далі."""
         async with self:
             self.streaming = True
             self.stream_content = ""
@@ -1894,16 +1934,17 @@ class State(rx.State):
             body = (self.stream_content or "").strip()
             thinking = self.stream_thinking
             self.streaming = False
-            self.stopping = False
-            _STOP_EVENTS.pop(cid, None)
+            if not keep_stop:
+                self.stopping = False
+                _STOP_EVENTS.pop(cid, None)
         return body, thinking, tool_calls
 
-    # Тули, доступні read-only режимам (чат / answer): пошук + читання файлів/вкладень.
-    _READONLY_TOOLS = ("web_search", "read_file", "search", "list_dir", "recall")
+    # Тули режимів чату й аналізу (лише читання): пошук, читання файлів/вкладень, пам'ять, повна історія розмови.
+    _READONLY_TOOLS = ("web_search", "read_file", "search", "list_dir", "recall", "recall_history")
 
-    # Заголовок read_file, коли файл читається частинами (toolkit.h_read_file): "[name: рядки A-B з N]".
-    _PAGINATED_HEADER_RE = re.compile(r"^\[(.+?): рядки \d+-\d+ з \d+\]\n")
-    # Хвіст-підказка "лишилось N символів... offset=X)]" — лишаємо як є, щоб
+    # Заголовок read_file, коли файл читається частинами (toolkit.h_read_file): "[name: рядки A-B з N]" / "символи".
+    _PAGINATED_HEADER_RE = re.compile(r"^\[(.+?): (?:рядки|символи) \d+-\d+ з \d+\]\n")
+    # Хвіст-підказка "лишилось N … read_file(path=…, start_line|offset=…)]" — лишаємо як є, щоб
     # agent_loop.pending_continuation продовжував працювати й після заміни на дайджест.
     _CONTINUATION_SUFFIX_RE = re.compile(r"\n\n…\[лишилось .*?\]$", re.DOTALL)
 
@@ -1933,43 +1974,20 @@ class State(rx.State):
         memory[name] = digest
         return f"=== {name} (дайджест прочитаного дотепер) ===\n{digest}{suffix}"
 
-    async def _dispatch_tool_calls(self, tool_calls: list, msgs: list, reg, tctx,
-                                   digest_memory: dict[str, str] | None = None, client=None,
-                                   digest_profile: dict = config.EXECUTOR):
-        """Виконати tool_calls: дописати результати в msgs + показати кроки в чаті.
-        digest_memory (опційно): якщо передано — шматки великих вкладень (read_attachment
-        пагінація) зливаються в дайджест (convo.update_digest) замість накопичення сирими
-        шматками в контексті. Без цього параметра — поведінка як була."""
-        import json as _json
-        for call in tool_calls:
-            name = call.get("function", {}).get("name", "")
-            args = call.get("function", {}).get("arguments", {})
-            if isinstance(args, str):
-                try:
-                    args = _json.loads(args)
-                except Exception:
-                    args = {}
-            label = args.get("name") or args.get("query") or args.get("path") or name
-            async with self:
-                self.status = f"{name}: {label}"[:60]
-            async with self:
-                aid = self._act_start("tool", name, act.summarize_args(name, args))
-            t_tool = time.monotonic()
-            result = await asyncio.to_thread(lambda n=name, a=args: reg.dispatch(n, a, tctx))
-            async with self:
-                self._act_done(aid, f"{time.monotonic() - t_tool:.1f}с · " + act.clip_result(result),
-                               ok=act.result_ok(result))
-            shown = result
-            if (digest_memory is not None and name in ("read_attachment", "read_file") and client is not None
-                    and tctx.attachments_dir and self._PAGINATED_HEADER_RE.match(result or "")
-                    and (Path(tctx.attachments_dir) / self._PAGINATED_HEADER_RE.match(result).group(1)).is_file()):
-                async with self:
-                    self.status = f"Узагальнюю прочитане ({label})…"
-                shown = await self._digest_attachment_chunk(label, result, digest_memory, client,
-                                                             digest_profile)
-            msgs.append({"role": "tool", "content": shown})
-            async with self:
-                self._append("assistant", f"🔧 {name} · {label}", "step", thinking=shown)
+    def _needs_digest(self, tctx, name: str, result: str) -> str:
+        """Ім'я вкладення, чий шматок варто злити в дайджест ('' — ні): лише читання ВЕЛИКОГО вкладення частинами
+        (файл більший за limits.inline — сирі шматки не вмістились би у вікно). Менші файли йдуть як є, без втрат
+        (CRUTCHES.md B2: дайджест втратний — губить точні цифри й цитати)."""
+        if name not in ("read_file", "read_attachment") or not getattr(tctx, "attachments_dir", None):
+            return ""
+        m = self._PAGINATED_HEADER_RE.match(result or "")
+        if not m:
+            return ""
+        p = Path(tctx.attachments_dir) / m.group(1)
+        try:
+            return m.group(1) if p.is_file() and p.stat().st_size > limits.get().inline else ""
+        except OSError:
+            return ""
 
     async def _synthesize_with_retry(self, msgs: list, client,
                                      profile: dict = config.PLANNER,
@@ -2023,136 +2041,58 @@ class State(rx.State):
                 body = ""
         return body, thinking
 
-    async def _run_tool_chat(self, msgs: list, tctx: ToolContext, client,
-                             max_rounds: int = 6, gather_first: bool = False,
-                             gather_profile: dict = config.EXECUTOR) -> str:
-        """Тул-цикл для read-only режимів.
+    CHAT_FINALIZE = ("Досить збирати інформацію. Дай повну відповідь користувачу за тим, що вже прочитано й знайдено; "
+                     "більше не викликай інструменти. Якщо чогось не вистачило — так і скажи, чого саме.")
 
-        gather_first=True (є прикріплені файли): фаза ЗБОРУ йде з think=OFF
-        (gather_profile — за дефолтом EXECUTOR/Qwen для answer-режиму /КОД-аналізу;
-        chat-режим передає config.CHAT_EXECUTOR/gemma — інакше chat випадково
-        тягнув би кодинг-модель лише тому, що think=off надійніший для tool_calls)
-        — модель надійно емітить tool_calls (read_attachment), а не «думає» про них
-        без виклику; потім ОДИН фінальний синтез з think=ON (PLANNER/gemma, стрім,
-        живий лічильник).
+    @staticmethod
+    def _read_floor(cid: str, names: list) -> int:
+        """Скільки читань поспіль дозволити до примусового висновку: велике вкладення читається багатьма частинами.
+        Рахуємо ДЕТЕРМІНОВАНО з розміру файлів (раніше — ще й окремим викликом моделі в _estimate_rounds)."""
+        if not names or not cid:
+            return 0
+        sizes = {n["name"]: n["size"] for n in A.list_saved(cid)}
+        chunk = max(1, limits.get().chunk)
+        total = sum(-(-sizes.get(n, 0) // chunk) for n in names)
+        return total + 4 if total else 0
 
-        gather_first=False (простий чат/web_search): think=ON стрім-цикл як є; якщо
-        раунди вичерпано на тулах — форсований фінал без тулів."""
-        reg = default_registry()
-        tools = [t for t in reg.schema() if t["function"]["name"] in self._READONLY_TOOLS]
-
-        if gather_first:
-            nudged = False
-            digest_memory: dict[str, str] = {}   # name -> накопичувальний дайджест великого файлу
-            for _ in range(max_rounds):
-                msg = await asyncio.to_thread(
-                    lambda: client.chat(msgs, tools=tools, profile=gather_profile))
-                tool_calls, recovered = recover_tool_calls(msg)
-                if not tool_calls:
-                    content = (msg.get("content") or "").strip()
-                    # Великий файл читається частинами (read_attachment offset-пагінація,
-                    # toolkit.ATTACHMENT_CHUNK_SIZE) — якщо модель не продовжила сама,
-                    # дочитуємо БЕЗ її участі (текстовий nudge ненадійний, бачили живцем
-                    # 15+ ідентичних повторів "продовжую читати" без жодної дії).
-                    cont = pending_continuation(msgs)
-                    # Модель НАРАТИВНО оголошує намір прочитати вкладення ("I will call
-                    # read_attachment for all 6 files first.") і просто зупиняється —
-                    # should_nudge дає лише ОДИН nudge на всю фазу збору, а слабка
-                    # модель на важкій багатофайловій задачі стабільно повторює це
-                    # навіть ПІСЛЯ нього (другий раз should_nudge мовчить через
-                    # already_nudged) -> break без жодних даних -> "(порожня відповідь)"
-                    # у фіналі (живий кейс). Імена файлів модель отримала через
-                    # attachments_note — то й виконуємо її намір НАПРЯМУ, без надії на
-                    # повторну співпрацю. Перевіряємо ще й буквальну згадку
-                    # "read_attachment", щоб не зачепити намір про ІНШИЙ тул (run_shell тощо).
-                    known = ([p.name for p in Path(tctx.attachments_dir).iterdir() if p.is_file()]
-                             if tctx.attachments_dir and Path(tctx.attachments_dir).is_dir() else [])
-                    intended = (extract_intended_attachments(content, known)
-                                if known and limits.get().weak_model_fixes
-                                and "read_attachment" in content else [])
-                    if cont is not None:
-                        tool_calls, recovered = [cont], True
-                    elif intended:
-                        tool_calls, recovered = (
-                            [{"function": {"name": "read_attachment", "arguments": {"name": n}}}
-                             for n in intended],
-                            True,
-                        )
-                    # Якщо контент непорожній і не просочений — це справді "досить
-                    # зібрано, йду відповідати" (валідний ранній вихід). Інакше раніше
-                    # цикл просто `break`-ався без жодних зібраних даних (типово —
-                    # вкладення взагалі не прочитане), звідси "(порожня відповідь)" на
-                    # живому кейсі з великим paste-вкладенням. Див. agent_loop.should_nudge.
-                    elif should_nudge(content, nudged):
-                        nudged = True
-                        msgs.append({"role": "user", "content": NUDGE_TEXT})
-                        continue
-                    else:
-                        break
-                msgs.append({"role": "assistant", "content": "" if recovered else msg.get("content", ""),
-                             "tool_calls": tool_calls})
-                await self._dispatch_tool_calls(tool_calls, msgs, reg, tctx,
-                                                digest_memory=digest_memory, client=client,
-                                                digest_profile=gather_profile)
+    async def _run_read_loop(self, msgs: list, tctx: ToolContext, client, read_floor: int = 0,
+                             digest_profile: dict = config.EXECUTOR) -> str:
+        """Режими чату й аналізу на СПІЛЬНОМУ ядрі циклу (agent.steploop.run_loop), як і кроки код-режиму: ті самі
+        запобіжники (зациклення, читання без дій, стиснення з адресою оригіналу, дочитування вкладень). Раніше тут жив
+        окремий цикл _run_tool_chat із фазою збору й синтезу та власними копіями милиць (CRUTCHES.md, розділ C).
+          * сильна модель (weak_model_fixes вимкнено): ОДИН цикл із роздумами й стрімом — остання репліка і є
+            відповідь (живий тест T1: однофазний цикл надійно викликає тули);
+          * слабка модель (weak_model_fixes): збір тулами без роздумів, потім окремий синтез із роздумами (як раніше).
+        Порожня відповідь чи висновок після запобіжника → _synthesize_with_retry. Додає відповідь у чат, повертає текст."""
+        from agent.agent_loop import READ_FORCE, READ_WARN
+        from agent.steploop import STOPPED_MSG, LoopConfig, run_loop
+        weak = limits.get().weak_model_fixes
+        reg = default_registry().subset(self._READONLY_TOOLS)
+        async with self:
+            cid = self.current_id
+        hooks = _ReadHooks(self, cid, client, stream=not weak, digest_profile=digest_profile)
+        cfg = LoopConfig(max_iters=max(limits.get().hard_iters or 30, read_floor + 8),
+                         profile=config.EXECUTOR if weak else config.PLANNER, summarize=False, finalize_on_stuck=True,
+                         read_warn=max(READ_WARN, read_floor), read_force=max(READ_FORCE, read_floor + 4),
+                         finalize_text=self.CHAT_FINALIZE)
+        res = await run_loop(msgs, registry=reg, ctx=tctx, client=client, hooks=hooks, cfg=cfg)
+        if weak:                                            # стрім рахує токени сам; виклики без стріму — тут
+            async with self:
+                self._add_stats(res.stats)
+        body, thinking = (res.final or "").strip(), hooks.last_thinking
+        if body == STOPPED_MSG:
+            async with self:
+                self._append("assistant", "⛔ Зупинено.", "note")
+            return ""
+        if weak or not body or is_incomplete(body):
             async with self:
                 self.status = "Формулюю відповідь…"
+            if body and is_incomplete(body):
+                msgs.append({"role": "user", "content": self.CHAT_FINALIZE})
             body, thinking = await self._synthesize_with_retry(msgs, client)
-            async with self:
-                self._append("assistant", body or "(порожня відповідь)", "answer",
-                             thinking=thinking)
-            return body
-
-        for _ in range(max_rounds):
-            body, thinking, tool_calls = await self._run_stream(
-                client.chat_stream(msgs, tools=tools, profile=config.PLANNER))
-            if not tool_calls:                       # модель завершила — це фінальна відповідь
-                if not (body or "").strip():
-                    # Завершила без жодного тула, але й без контенту — той самий
-                    # "застрягла в роздумах" живий кейс, тут без передісторії тулів.
-                    body, thinking = await self._synthesize_with_retry(msgs, client)
-                async with self:
-                    self._append("assistant", body, "answer", thinking=thinking)
-                return body
-            msgs.append({"role": "assistant", "content": body, "tool_calls": tool_calls})
-            await self._dispatch_tool_calls(tool_calls, msgs, reg, tctx)
-        # Раунди вичерпано на викликах тулів → змушуємо модель відповісти зібраним (без тулів).
         async with self:
-            self.status = "Формулюю відповідь…"
-        msgs.append({"role": "user",
-                     "content": "Достатньо читання. Дай повну відповідь українською за "
-                                "зібраними даними, більше не викликай тулів."})
-        body, thinking = await self._synthesize_with_retry(msgs, client)
-        async with self:
-            self._append("assistant", body or "(не вдалося сформувати відповідь)",
-                         "answer", thinking=thinking)
+            self._append("assistant", body or "(не вдалося сформувати відповідь)", "answer", thinking=thinking)
         return body
-
-    async def _estimate_rounds(self, text: str, names: list, client,
-                               profile: dict = config.EXECUTOR, cid: str = "") -> int:
-        """Адаптивний ліміт раундів тул-циклу. Коли є прикріплені файли — оцінюємо
-        через _estimate_iters (модель каже n тул-викликів → max(6, n*2)), щоб ліміт
-        масштабувався під кількість/складність файлів, а не впирався в хардкод. Без
-        файлів — дефолт 6 (ліміт усе одно не зв'язує простий чат: він завершується
-        першим раундом без тулів). profile: chat-режим передає CHAT_EXECUTOR (gemma).
-
-        Модель не знає РЕАЛЬНОГО розміру файлу (бачить лише імʼя), тож її власна
-        оцінка систематично занижена для великих вкладень — живий кейс: цикл
-        вичерпав раунди на півдорозі через 386KB файл і пішов на синтез із
-        недочитаним дайджестом (обірвана відповідь). Розмір ми знаємо ДЕТЕРМІНОВАНО
-        (без LLM) — рахуємо мінімум раундів від нього напряму й беремо максимум з
-        оцінкою моделі, а не покладаємось лише на її вгадування."""
-        if not names:
-            return 6
-        size_floor = 6
-        if cid:
-            sizes = {n["name"]: n["size"] for n in A.list_saved(cid)}
-            chunk = limits.get().chunk
-            total_chunks = sum(-(-sizes.get(n, 0) // chunk) for n in names)
-            if total_chunks:
-                size_floor = total_chunks + 4   # +4 запас на нюджі/нечитальні раунди
-        model_estimate = await asyncio.to_thread(
-            lambda: _estimate_iters(text, "files: " + "; ".join(names), client, profile=profile))
-        return max(model_estimate, size_floor)
 
     @staticmethod
     def _inject_files(content: str, cur_names: list, other_names: list) -> str:
@@ -2189,9 +2129,9 @@ class State(rx.State):
         return new_content, bool(cur or others)
 
     async def _chat_reply(self, text: str, client, att_note: str = "") -> str:
-        """Чат-режим: думаюча модель + read-only тули. У поточну user-репліку вшиваємо
+        """Чат-режим: думаюча модель + тули читання (спільне ядро циклу, _run_read_loop). У поточну user-репліку вшиваємо
         імена файлів, прикріплених САМЕ до неї (m['attachments']); модель читає їх через
-        read_attachment (attachments_dir = тека вкладень сесії)."""
+        read_file за іменем (attachments_dir = тека вкладень сесії)."""
         async with self:
             cid = self.current_id
             proj_id = self.chat_project_id
@@ -2206,18 +2146,16 @@ class State(rx.State):
         cur_atts = [n for n in cur_atts if not images.is_image_name(n)]      # картинки йдуть окремо, як зображення
         all_names = [n["name"] for n in A.list_text(cid)]
         other_names = [n for n in all_names if n not in cur_atts]
-        needs_tool_files = bool(other_names)
         # Вшити переліки файлів у ОСТАННЮ user-репліку (поточний хід), якщо файли є.
         # cur_atts (файли САМЕ цього повідомлення) вшиваються ВМІСТОМ напряму, якщо
-        # сумарно малі (A.INLINE_BUDGET) — без жодного read_attachment-раунду;
+        # сумарно малі (limits.inline) — без жодного раунду читання;
         # other_names лишаються лише посиланням (тулом, "якщо запит саме про них").
         if all_names and history and history[-1]["role"] == "user":
-            new_content, needs_tool_files = self._attach_or_reference(
-                cid, history[-1]["content"], cur_atts, other_names)
+            new_content, _ = self._attach_or_reference(cid, history[-1]["content"], cur_atts, other_names)
             history[-1] = {**history[-1], "content": new_content}
         tctx = ToolContext(root=A.session_dir(cid),
                            permissions={"edits": "off", "shell": "off"}, client=client,
-                           attachments_dir=A.session_dir(cid))
+                           attachments_dir=A.session_dir(cid), session_id=cid)
         all_topics = await asyncio.to_thread(topics.list_topics)
         topics_note = topics.available_topics_note(all_topics)
         # project_block ПЕРШИМ — інструкції проекту задають рамку розмови, тема й
@@ -2226,24 +2164,17 @@ class State(rx.State):
         if imgs and history and history[-1]["role"] == "user":      # зображення — до поточної репліки користувача
             history[-1] = {**history[-1], "images": imgs}
         msgs = [{"role": "system", "content": system}] + history
-        rounds = await self._estimate_rounds(text, cur_atts or all_names, client,
-                                             profile=config.CHAT_EXECUTOR, cid=cid)
-        # think=off-збір ПОТРІБЕН лише якщо ЛИШИЛИСЬ файли/теми, що читаються тулом
-        # (other_names чи topics) — інакше модель НАДІЙНО викликала б read_attachment
-        # (think=on часто «думає» про тул, але не викликає). Якщо все вже вшито
-        # напряму (needs_tool_files=False, без тем) — прямий think=on-стрім без
-        # зайвого тул-циклу взагалі: саме та "обробка за один виклик", яку просили.
-        # gather_profile=CHAT_EXECUTOR (gemma) — chat-режим не торкає кодинг-модель.
-        return await self._run_tool_chat(msgs, tctx, client, rounds,
-                                         gather_first=bool(needs_tool_files or all_topics),
-                                         gather_profile=config.CHAT_EXECUTOR)
+        return await self._run_read_loop(msgs, tctx, client, self._read_floor(cid, cur_atts or all_names),
+                                         digest_profile=config.CHAT_EXECUTOR)
 
     # Системний промпт answer-режиму В ТУЛ-ЦИКЛІ: на відміну від answerer.SYSTEM, явно
     # каже про read_file/list_dir — інакше модель «просить користувача прислати файли»
     # замість того, щоб прочитати їх самій (той самий баг, що зупиняв аналіз після плану).
     _ANSWER_TOOLS_SYSTEM = (
         "You are a code analysis assistant for a local project. You have tools: "
-        "read_file(path) and list_dir(path) to inspect ANY file in the project, plus "
+        "search(pattern) to find lines in project files (use it first to locate code), "
+        "read_file(path, start_line, limit) and list_dir(path) to inspect ANY file in the project, "
+        "recall_history(query) for exact details of the earlier conversation, plus "
         "web_search. The project structure is in the context. To answer ACCURATELY you "
         "MUST read the relevant files yourself with read_file — NEVER ask the user to "
         "paste or provide file contents, you can read them directly. Read the files you "
@@ -2272,12 +2203,11 @@ class State(rx.State):
         tctx = ToolContext(root=Path(root) if root else Path.home(),
                            permissions={"edits": "off", "shell": "off"}, client=client,
                            attachments_dir=A.session_dir(cid), track_project=bool(root),
-                           extra_roots=[Path(x) for x in self.extra_dirs])
+                           extra_roots=[Path(x) for x in self.extra_dirs], session_id=cid)
         cur_atts = [n for n in cur_atts if not images.is_image_name(n)]
         all_names = [n["name"] for n in A.list_text(cid)]
         other_names = [n for n in all_names if n not in cur_atts]
-        # cur_atts малі сумарно -> вшиваємо вмістом напряму (менше тул-раундів);
-        # answer-режим однаково forced gather_first=True нижче (читає й код проєкту).
+        # cur_atts малі сумарно -> вшиваємо вмістом напряму (менше раундів читання)
         question, _ = self._attach_or_reference(cid, text, cur_atts, other_names)
         parts = [f"Контекст:\n{ctx}" if ctx else "", f"Питання:\n{question}"]
         user = "\n\n".join(p for p in parts if p)
@@ -2285,12 +2215,9 @@ class State(rx.State):
         if imgs:
             umsg["images"] = imgs
         msgs = [{"role": "system", "content": ANSWER_SYSTEM}, umsg]
-        rounds = await self._estimate_rounds(text, cur_atts or all_names, client, cid=cid)
-        # answer-режим = аналіз коду: ЗАВЖДИ think=off-збір, щоб модель надійно читала
-        # файли проєкту (read_file/list_dir). Без цього вона лише «планує» прозою й
-        # зупиняється, нічого не прочитавши (саме той баг «стоп після планування»).
-        # Фінальний синтез усе одно think=on (у _run_tool_chat).
-        return await self._run_tool_chat(msgs, tctx, client, rounds, gather_first=True)
+        # Аналіз коду на спільному ядрі циклу. Колишній баг «зупинка після планування» (модель лише описувала, що
+        # прочитає) лікувався фазою збору без роздумів — для слабкої моделі вона лишилась (weak_model_fixes).
+        return await self._run_read_loop(msgs, tctx, client, self._read_floor(cid, cur_atts or all_names))
 
     async def _maybe_auto_title(self, user_text: str, client):
         """Автоперейменування "Новий чат" -> коротка осмислена назва за першим

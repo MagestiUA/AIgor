@@ -4,8 +4,7 @@
 import tempfile
 from pathlib import Path
 
-from agent.agent_loop import (pending_continuation, run_step, _looks_like_leaked_reasoning,
-                              extract_intended_attachments)
+from agent.agent_loop import pending_continuation, run_step, _looks_like_leaked_reasoning
 from agent.toolkit import ToolContext
 
 
@@ -134,16 +133,6 @@ def main() -> None:
     final8, log8 = run_step("створи after_intent.txt", ctx, client=intent_then_call, max_iters=5)
     assert (root / "after_intent.txt").read_text(encoding="utf-8") == "ok", "nudge не витягнув крок (intent-only)"
     assert "Готово" in final8
-
-    # extract_intended_attachments: модель цитує конкретні імена -> повертає лише
-    # згадані (порядок як у known_names); жодне ім'я текстуально не співпало ("усі 6
-    # файлів" без перерахування) -> fallback на ВСІ відомі файли; немає відомих файлів -> [].
-    known = ["a.md", "b.md", "c.md"]
-    assert extract_intended_attachments("I will call read_attachment for b.md and a.md", known) \
-        == ["a.md", "b.md"]
-    assert extract_intended_attachments("I will call read_attachment for all 6 files first.", known) \
-        == known
-    assert extract_intended_attachments("I will call read_attachment for all files.", []) == []
 
     # _looks_like_leaked_reasoning: живий кейс — gemma4 видала англомовний self-talk
     # ("Wait,"/"Self-Correction"/"*Actually*") прямо у видиму відповідь замість

@@ -171,12 +171,15 @@ READ_NUDGE = ("Ти вже прочитав багато файлів поспі
 
 class ReadStreak:
     """Слідкує за «читанням без дій»: слабка модель читає файл за файлом і не переходить до висновку.
-    Кроки, що вже щось змінювали чи запускали (будь-який не-читальний тул), не чіпаємо — ними опікується планувальник."""
+    Кроки, що вже щось змінювали чи запускали (будь-який не-читальний тул), не чіпаємо — ними опікується планувальник.
+    warn/force — пороги (режими чату/аналізу піднімають їх під розмір вкладень: великий файл читається багатьма частинами)."""
 
-    def __init__(self) -> None:
+    def __init__(self, warn: int = 0, force: int = 0) -> None:
         self.streak = 0
         self.acted = False
         self.warned = False
+        self.warn_at = warn or READ_WARN
+        self.force_at = force or READ_FORCE
 
     def observe(self, name: str, args: dict | None = None) -> None:
         if name in READ_ONLY_TOOLS or (name == "run_shell" and is_read_command((args or {}).get("command", ""))):
@@ -189,17 +192,17 @@ class ReadStreak:
         """"" | "warn" | "force"."""
         if self.acted:
             return ""
-        if self.streak >= READ_FORCE:
+        if self.streak >= self.force_at:
             return "force"
-        if self.streak >= READ_WARN and not self.warned:
+        if self.streak >= self.warn_at and not self.warned:
             self.warned = True
             return "warn"
         return ""
 
 
-def finalize(messages: list[dict], client) -> str:
+def finalize(messages: list[dict], client, text: str = "") -> str:
     """Останній виклик БЕЗ тулів: примусовий висновок із зібраного. Порожньо, якщо модель нічого не дала."""
-    msgs = list(messages) + [{"role": "user", "content": FINALIZE_TEXT}]
+    msgs = list(messages) + [{"role": "user", "content": text or FINALIZE_TEXT}]
     try:
         out = (client.chat(msgs, profile=config.EXECUTOR).get("content") or "").strip()
     except Exception as e:
@@ -369,26 +372,6 @@ def _announces_tool_intent(content: str) -> bool:
     викликом — отже нічого насправді не станеться, якщо прийняти це як кінець кроку."""
     return (bool(content) and bool(_INTENT_PHRASE_RE.search(content))
             and bool(_TOOL_IDENT_RE.search(content)))
-
-
-def extract_intended_attachments(content: str, known_names: list[str]) -> list[str]:
-    """Живий кейс (gather-фаза _run_tool_chat, важка багатофайлова задача):
-    should_nudge дає лише ОДИН nudge на всю фазу збору (щоб не зациклитись), але
-    слабка модель стабільно повторює саме _announces_tool_intent навіть ПІСЛЯ
-    нього — другий раз should_nudge мовчить (already_nudged), цикл просто
-    `break`-ається БЕЗ жодних прочитаних даних -> "(порожня відповідь)" у фіналі.
-
-    Текстовий nudge тут принципово ненадійний (та сама причина, що й
-    pending_continuation для пагінації) — модель отримала реальні імена файлів
-    через attachments_note і просто ЦИТУЄ їх у своєму "I will call..." реченні.
-    Раз імена вже відомі (known_names — фактичні файли на диску) — виконуємо
-    намір моделі НАПРЯМУ: повертає підмножину known_names, згадану в content
-    (порядок як у known_names), або весь known_names, якщо жодне ім'я текстуально
-    не співпало (типовий випадок — "усіх N файлів" без перерахування)."""
-    if not known_names:
-        return []
-    mentioned = [n for n in known_names if n in content]
-    return mentioned or list(known_names)
 
 
 def _extract_leaked_tool_call(content: str) -> dict | None:

@@ -36,6 +36,10 @@ class LoopConfig:
     finalize_on_stuck: bool = False    # зациклення → висновок зі зібраного (субагент), а не «крок зупинено»
     compact_keep: int = COMPACT_KEEP
     compact_head: int = COMPACT_HEAD
+    profile: dict | None = None        # профіль виклику моделі (None = config.EXECUTOR; чат/аналіз — PLANNER, роздуми)
+    read_warn: int = 0                 # пороги «читання без дій» (0 = типові READ_WARN / READ_FORCE)
+    read_force: int = 0
+    finalize_text: str = ""            # текст запиту на примусовий висновок ('' = FINALIZE_TEXT виконавця)
 
 
 @dataclass
@@ -61,6 +65,10 @@ class LoopHooks:
 
     async def dispatch(self, registry, name: str, args: dict, ctx) -> str:
         return await self.run(lambda: registry.dispatch(name, args, ctx))
+
+    async def call_llm(self, client, messages: list, tools: list, profile: dict) -> dict:
+        """Один виклик моделі з тулами -> повідомлення {content, thinking?, tool_calls?}. UI чату перевизначає на стрім."""
+        return await self.run(lambda: client.chat(messages, tools=tools, profile=profile))
 
     def live_messages(self) -> list[str]:
         """Нові повідомлення користувача, написані ПІД ЧАС виконання (UI)."""
@@ -95,16 +103,17 @@ class LoopHooks:
 
 async def run_loop(messages: list, *, registry, ctx, client, hooks: LoopHooks, cfg: LoopConfig) -> LoopResult:
     """Крутити цикл, поки модель не завершить крок / не спрацює запобіжник. `messages` змінюється на місці."""
-    guard, reads = LoopGuard(), ReadStreak()
+    guard, reads = LoopGuard(), ReadStreak(cfg.read_warn, cfg.read_force)
     actions: list[tuple[str, dict, str]] = []
     stats: list[dict] = []
     final, nudged, since_cp = ITER_LIMIT_MSG, False, 0
     log = logs.get("agent")
+    profile = cfg.profile or config.EXECUTOR
 
     async def conclude(compact_first: bool = False) -> str:
         if compact_first:
             compact_tool_results(messages, keep_last=2, head=300)
-        return await hooks.run(finalize, messages, client)
+        return await hooks.run(finalize, messages, client, cfg.finalize_text)
 
     for _ in range(cfg.max_iters):
         if hooks.should_stop():
@@ -115,7 +124,7 @@ async def run_loop(messages: list, *, registry, ctx, client, hooks: LoopHooks, c
                              "Коментар користувача, написаний ПІД ЧАС виконання (врахуй, якщо стосується цього "
                              "кроку; планувальник також його побачить і скоригує план):\n" + text})
         token = await hooks.before_llm(messages)
-        msg = await hooks.run(lambda: client.chat(messages, tools=registry.schema(), profile=config.EXECUTOR))
+        msg = await hooks.call_llm(client, messages, registry.schema(), profile)
         ls = dict(getattr(client, "last_stats", None) or {})
         if ls:
             stats.append(ls)
