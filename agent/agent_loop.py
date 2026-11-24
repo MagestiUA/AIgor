@@ -28,15 +28,59 @@ COMPACT_KEEP = 6           # скільки останніх повідомле�
 COMPACT_HEAD = 500         # скільки символів лишаємо від старого результату тулу
 
 
+COMPACT_MARK = "…[стиснуто: було "
+_SPILL_PATH = re.compile(r"повний вивід у файлі (\S+?) —")
+
+
+def _q(v) -> str:
+    return "'" + str(v).replace("'", "\\'")[:200] + "'"
+
+
+def origin_pointer(name: str, args: dict, content: str) -> str:
+    """Точна адреса ОРИГІНАЛУ стиснутого результату: яким викликом його дістати знову (без втрат)."""
+    a = args or {}
+    if name in ("read_file", "read_attachment"):
+        path = a.get("path") or a.get("name") or ""
+        extra = "".join(f", {k}={int(a[k])}" for k in ("start_line", "limit", "offset") if str(a.get(k) or "").isdigit())
+        return f"read_file(path={_q(path)}{extra})"
+    if name == "run_shell":
+        m = _SPILL_PATH.search(content or "")
+        if m:
+            return f"повний вивід збережено: read_file(path={_q(m.group(1))}) або search(pattern, path={_q(m.group(1))})"
+        return f"повтори команду run_shell({_q(a.get('command', ''))}), якщо вивід ще потрібен"
+    if name == "search":
+        extra = "".join(f", {k}={_q(a[k])}" for k in ("path", "glob") if a.get(k))
+        return f"search(pattern={_q(a.get('pattern', ''))}{extra})"
+    try:
+        js = json.dumps(a, ensure_ascii=False)
+    except (TypeError, ValueError):
+        js = str(a)
+    return f"{name}({js[:200]})"
+
+
+def _tool_calls_by_result(messages: list[dict]) -> dict[int, tuple[str, dict]]:
+    """Індекс tool-повідомлення -> (назва тулу, аргументи) за порядком викликів у попередньому assistant-повідомленні."""
+    out, pending = {}, []
+    for i, m in enumerate(messages):
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            pending = [(c.get("function", {}).get("name", ""), _args(c)) for c in m["tool_calls"]]
+        elif m.get("role") == "tool":
+            out[i] = pending.pop(0) if pending else ("", {})
+    return out
+
+
 def compact_tool_results(messages: list[dict], keep_last: int = COMPACT_KEEP, head: int = COMPACT_HEAD) -> int:
-    """Стиснути СТАРІ результати тулів у циклі кроку (на місці): лишити початок + позначку.
-    Дії вже виконано, а їх підсумок бачив виконавець; без цього контекст кроку росте до 90% вікна й крок
-    переривається. -> скільки повідомлень стиснуто."""
+    """Стиснути СТАРІ результати тулів у циклі кроку (на місці): лишити початок + ТОЧНУ адресу оригіналу (яким
+    викликом дістати повний результат знову — файл, рядки, spill-файл команди). Дії вже виконано, а їх підсумок бачив
+    виконавець; без цього контекст кроку росте до 90% вікна й крок переривається. -> скільки повідомлень стиснуто."""
     n = 0
-    for m in messages[:max(0, len(messages) - keep_last)]:
+    calls = _tool_calls_by_result(messages)
+    for i, m in enumerate(messages[:max(0, len(messages) - keep_last)]):
         c = m.get("content")
-        if m.get("role") == "tool" and isinstance(c, str) and len(c) > head + 80 and "[стиснуто" not in c[-60:]:
-            m["content"] = c[:head] + f"\n…[стиснуто: було {len(c)} символів; повторіть виклик, якщо потрібно]"
+        if m.get("role") == "tool" and isinstance(c, str) and len(c) > head + 80 and COMPACT_MARK not in c:
+            name, args = calls.get(i, ("", {}))
+            ptr = origin_pointer(name, args, c) if name else "повтори той самий виклик, якщо потрібно"
+            m["content"] = c[:head] + f"\n{COMPACT_MARK}{len(c)} символів; оригінал — {ptr}]"
             n += 1
     return n
 

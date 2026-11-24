@@ -28,6 +28,11 @@ def _dir(sid: str) -> Path:
     return ROOT / re.sub(r"[^A-Za-z0-9_-]+", "_", sid or "")
 
 
+def note_dir(sid: str) -> Path:
+    """Тека нотаток сесії (модель може шукати в ній search(pattern, path=…) — нотатки звичайні .md-файли)."""
+    return _dir(sid)
+
+
 def _slug(name: str) -> str:
     s = re.sub(r"[^\w\-]+", "-", (name or "").strip().lower(), flags=re.UNICODE).strip("-")
     return s[:60] or "note"
@@ -90,7 +95,8 @@ def index_block(sid: str, budget: int = INDEX_CHARS) -> str:
     notes = list_notes(sid)
     if not notes:
         return ""
-    head = "Нотатки цієї сесії (з'ясоване раніше; щоб прочитати — recall(name), щоб додати — remember(name, text)):"
+    head = ("Нотатки цієї сесії (з'ясоване раніше; щоб прочитати — recall(name), щоб додати — remember(name, text); "
+            f"файли нотаток: {note_dir(sid)}):")
     lines, used = [], len(head)
     for slug, gist, size in notes:
         ln = f"- {slug}: {gist}" if gist else f"- {slug}"

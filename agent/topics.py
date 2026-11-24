@@ -72,8 +72,12 @@ def list_topics() -> list[str]:
     return [p.stem for p in files]
 
 
+def topic_path(slug: str) -> Path:
+    return TOPICS_ROOT / f"{_slug(slug)}.txt"
+
+
 def load_topic(slug: str) -> str:
-    p = TOPICS_ROOT / f"{_slug(slug)}.txt"
+    p = topic_path(slug)
     return p.read_text(encoding="utf-8") if p.is_file() else ""
 
 
@@ -164,9 +168,9 @@ def update_topic_note(prev: str, user_text: str, outcome: str,
 def available_topics_note(names: list[str]) -> str:
     """Блок для контексту чату: які теми (з усіх чатів — спільні) існують зараз.
     Повний вміст НЕ підставляється тут — модель сама читає потрібну через тул
-    read_topic(name), якщо поточна розмова її продовжує."""
+    recall(name), якщо поточна розмова її продовжує."""
     if not names:
         return ""
     return ("Існують нотатки попередніх аналітичних розмов за темами (читай через "
-            "read_topic(name), якщо ЦЯ розмова продовжує одну з них): "
+            f"recall(name), якщо ЦЯ розмова продовжує одну з них; шукати в усіх — search(pattern, path='{TOPICS_ROOT}')): "
             + ", ".join(names) + ".\n\n")

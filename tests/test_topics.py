@@ -102,6 +102,23 @@ def main() -> None:
         topics.save_topic("../../escape", "x")
         assert not (topics.TOPICS_ROOT.parent.parent / "escape.txt").exists()
 
+        # одна «пам'ять»: recall читає і теми (раніше окремий read_topic); тема — звичайний файл, велика — частинами
+        from agent.toolkit import ToolContext, default_registry
+        reg = default_registry()
+        ctx = ToolContext(root=Path(tempfile.mkdtemp()))
+        got = reg.dispatch("recall", {"name": "костянтинівка"}, ctx)
+        assert got.startswith("=== тема: Костянтинівка ===") and "156 бригада" in got, got[:200]
+        assert "156 бригада" in reg.dispatch("read_topic", {"name": "Костянтин"}, ctx)       # стара назва працює
+        assert "read_topic" not in reg.names() and "теми:" in reg.dispatch("recall", {"name": "нема-такої"}, ctx)
+        topics.save_topic("Велика", "".join(f"рядок {i}\n" for i in range(40_000)))
+        big = reg.dispatch("recall", {"name": "Велика"}, ctx)
+        assert "рядки 1-" in big and "start_line=" in big and len(big) < 200_000, big[:200]
+        # теки пам'яті — лише ЧИТАННЯ: пошук працює, запис туди заборонено
+        assert "рядок 39999" in reg.dispatch("search", {"pattern": "рядок 39999", "path": str(topics.TOPICS_ROOT)}, ctx)
+        ctx.permissions = {"edits": "auto", "shell": "off"}
+        assert "поза межами" in reg.dispatch("write_file", {"path": str(topics.TOPICS_ROOT / "x.txt"), "content": "x"}, ctx)
+        assert not (topics.TOPICS_ROOT / "x.txt").exists()
+
         # сповіщення про стиснення нотатки теми
         ev: list = []
         topics.update_topic_note("x" * 200, "ще", "ще", client=Stub(["y" * 5000, "СТИСНУТО"]), budget=1000,

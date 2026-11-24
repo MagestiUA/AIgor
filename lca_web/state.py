@@ -1899,7 +1899,7 @@ class State(rx.State):
         return body, thinking, tool_calls
 
     # Тули, доступні read-only режимам (чат / answer): пошук + читання файлів/вкладень.
-    _READONLY_TOOLS = ("web_search", "read_file", "search", "list_dir", "read_topic")
+    _READONLY_TOOLS = ("web_search", "read_file", "search", "list_dir", "recall")
 
     # Заголовок read_file, коли файл читається частинами (toolkit.h_read_file): "[name: рядки A-B з N]".
     _PAGINATED_HEADER_RE = re.compile(r"^\[(.+?): рядки \d+-\d+ з \d+\]\n")

@@ -140,7 +140,7 @@ def h_project_note(args, ctx):
 
 
 # ── Обробники ────────────────────────────────────────────────────────────────
-def _resolve(ctx: ToolContext, path: str) -> Path:
+def _resolve(ctx: ToolContext, path: str, write: bool = False) -> Path:
     """Резолвити шлях відносно кореня проєкту й боронити вихід за його межі
     (traversal через `..` або абсолютний шлях). Без цього модель — особливо при
     edits=auto — могла б читати/писати будь-де на диску (напр. ~/.ssh, поза проєктом).
@@ -148,18 +148,25 @@ def _resolve(ctx: ToolContext, path: str) -> Path:
     root = ctx.root.resolve()
     p = Path(path)
     full = (p if p.is_absolute() else root / p).resolve()
-    for base in [root, *(Path(x).resolve() for x in ctx.extra_roots), *_aux_roots(ctx)]:   # корінь + додані теки + службові
+    bases = [root, *(Path(x).resolve() for x in ctx.extra_roots)]           # корінь + додані теки: читання і запис
+    if not write:
+        bases += _aux_roots(ctx)                                             # службові теки: лише читання
+    for base in bases:
         if full == base or base in full.parents:
             return full
     raise ValueError(f"шлях поза межами проєкту заборонено: {path}")
 
 
 def _aux_roots(ctx) -> list[Path]:
-    """Службові теки, які модель може читати за повним шляхом: повні виводи тулів (spill) і вкладення цього чату."""
+    """Службові теки «пам'яті», які модель може ЧИТАТИ (read_file/search) за повним шляхом: повні виводи тулів (spill),
+    вкладення цього чату, теми чату й нотатки цієї сесії. Усе — файли, тож ті самі тули читання працюють і для них."""
+    from . import sessionmem, topics
     from .spill import SPILL_ROOT
-    out = [SPILL_ROOT.resolve()]
+    out = [SPILL_ROOT.resolve(), topics.TOPICS_ROOT.resolve()]
     if getattr(ctx, "attachments_dir", None):
         out.append(Path(ctx.attachments_dir).resolve())
+    if getattr(ctx, "session_id", ""):
+        out.append(sessionmem.note_dir(ctx.session_id).resolve())
     return out
 
 
@@ -332,33 +339,22 @@ def h_read_attachment(args, ctx):
 
 
 def h_read_topic(args, ctx):
-    """Прочитати нотатку теми (chat-режим, спільна памʼять між чатами — agent.topics).
-    Нечіткий пошук за іменем, як read_attachment."""
+    """Старий тул read_topic (тепер теми читає recall). Прихований тул сумісності: шукає САМЕ серед тем."""
     from . import topics
-    q = (args.get("name") or "").strip()
-    existing = topics.list_topics()
-    if not existing:
+    if not topics.list_topics():
         return "немає збережених тем"
-    match = next((t for t in existing if t == q), None)
-    if not match and q:
-        ql = q.lower()
-        cand = ([t for t in existing if t.lower() == ql]
-                or [t for t in existing if ql in t.lower()]
-                or [t for t in existing if t.lower() in ql])
-        match = cand[0] if cand else None
-    if not match:
-        return f"тема '{q}' не знайдена. Існуючі теми: {', '.join(existing)}"
-    content = topics.load_topic(match)
-    if len(content) > 8000:
-        content = content[:8000] + f"\n\n…[обрізано: показано 8000 з {len(content)} символів]"
-    return f"=== тема: {match} ===\n{content}"
+    q = (args.get("name") or "").strip()
+    t = _find_topic(q)
+    if t is None:
+        return f"тема '{q}' не знайдена. Існуючі теми: {', '.join(topics.list_topics())}"
+    return f"=== тема: {t} ===\n" + h_read_file({"path": str(topics.topic_path(t))}, ctx)
 
 
 def h_write_file(args, ctx):
     rel = (args.get("path") or "").strip()
     if not rel:
         return "помилка: не вказано path для write_file"
-    p = _resolve(ctx, rel)
+    p = _resolve(ctx, rel, write=True)
     if p.is_dir():
         return f"помилка: '{rel}' — це тека, а не файл"
     content = args.get("content", "")
@@ -423,7 +419,7 @@ def h_replace_in_file(args, ctx):
     rel = str(args.get("path") or "").strip()
     if not rel:
         return "помилка: не вказано path для replace_in_file"
-    p = _resolve(ctx, rel)
+    p = _resolve(ctx, rel, write=True)
     if not p.is_file():
         return f"файл не знайдено: {rel} (новий файл створюй write_file)"
     old, new = T.text_for_model(str(args.get("old") or "")), T.text_for_model(str(args.get("new") or ""))
@@ -458,7 +454,7 @@ def h_replace_in_file(args, ctx):
 
 
 def h_edit_file(args, ctx):
-    p = _resolve(ctx, args.get("path", ""))
+    p = _resolve(ctx, args.get("path", ""), write=True)
     if not p.is_file():
         return f"файл не знайдено: {args.get('path')}"
     res = run_patch(p, args.get("instruction", ""), ctx.client, False)
@@ -466,7 +462,7 @@ def h_edit_file(args, ctx):
 
 
 def h_create_from_source(args, ctx):
-    target = _resolve(ctx, args.get("target", ""))
+    target = _resolve(ctx, args.get("target", ""), write=True)
     source = _resolve(ctx, args.get("source", ""))
     if not source.is_file():
         return f"джерело не знайдено: {args.get('source')}"
@@ -486,16 +482,36 @@ def h_remember(args, ctx):
     return f"нотатку збережено: {slug}" if slug else "не вдалось зберегти нотатку"
 
 
+def _find_topic(name: str):
+    """Тема чату (спільна пам'ять між чатами) за назвою: точна → без регістру → підрядок. -> назва | None."""
+    from . import topics
+    existing = topics.list_topics()
+    q = (name or "").strip()
+    if not q or not existing:
+        return None
+    ql = q.lower()
+    return next((t for t in existing if t == q), None) or next(
+        iter([t for t in existing if t.lower() == ql] or [t for t in existing if ql in t.lower()]
+             or [t for t in existing if t.lower() in ql]), None)
+
+
 def h_recall(args, ctx):
-    from . import sessionmem
+    """Одна «пам'ять» для моделі: спершу нотатки цієї сесії (remember), потім теми чату (спільні нотатки минулих
+    розмов). Тема читається як звичайний файл через read_file — велика віддається частинами, а не обрізається."""
+    from . import sessionmem, topics
     name = (args.get("name") or "").strip()
-    if not ctx.session_id:
-        return "нотатки недоступні: немає активної сесії"
-    text = sessionmem.read_note(ctx.session_id, name) if name else None
-    if text is None:
-        have = ", ".join(s for s, _, _ in sessionmem.list_notes(ctx.session_id)) or "нотаток ще нема"
-        return f"нотатки «{name}» нема. Є: {have}"
-    return text
+    if ctx.session_id and name:
+        text = sessionmem.read_note(ctx.session_id, name)
+        if text is not None:
+            return text
+    t = _find_topic(name)
+    if t is not None:
+        body = h_read_file({"path": str(topics.topic_path(t))}, ctx)
+        return f"=== тема: {t} ===\n{body}"
+    notes = ", ".join(s for s, _, _ in sessionmem.list_notes(ctx.session_id)) if ctx.session_id else ""
+    tops = ", ".join(topics.list_topics()[:30])
+    have = "; ".join(x for x in (f"нотатки: {notes}" if notes else "", f"теми: {tops}" if tops else "") if x)
+    return f"нотатки «{name}» нема. Є: {have or 'нотаток ще нема'}"
 
 
 def h_recall_history(args, ctx):
@@ -597,12 +613,8 @@ def default_registry() -> ToolRegistry:
                     {"query": {"type": "string", "description": "пошуковий запит"},
                      "max_results": {"type": "integer", "description": "скільки результатів, типово 5"}},
                     ["query"], h_web_search))
-    r.register(Tool("read_topic",
-                    "Прочитати нотатку попередньої аналітичної розмови за темою (chat-режим, "
-                    "СПІЛЬНА памʼять між усіма чатами). Викликай, коли ЦЯ розмова продовжує "
-                    "тему зі списку доступних тем у контексті.",
-                    {"name": {"type": "string", "description": "назва теми"}},
-                    ["name"], h_read_topic))
+    r.register(Tool("read_topic", "", {"name": {"type": "string"}}, ["name"], h_read_topic),
+               compat_for="recall")                     # теми читає recall; стара назва — для старих викликів
     r.register(Tool("remember",
                     "Записати коротку нотатку сесії про те, що ти з'ясував і що знадобиться пізніше (де що лежить, обмеження, "
                     "рішення). Нотатки не займають контекст — у ньому лише перелік назв. НЕ клади сюди довгі значення "
@@ -611,7 +623,8 @@ def default_registry() -> ToolRegistry:
                      "text": {"type": "string", "description": "суть, 1-10 рядків"}},
                     ["name", "text"], h_remember))
     r.register(Tool("recall",
-                    "Прочитати нотатку сесії за назвою (перелік є в контексті; назва може бути неповною).",
+                    "Прочитати нотатку за назвою (перелік є в контексті; назва може бути неповною): нотатки цієї сесії "
+                    "(remember) і теми минулих розмов — спільна пам'ять між чатами.",
                     {"name": {"type": "string"}}, ["name"], h_recall))
     r.register(Tool("recall_history",
                     "Знайти деталі в ПОВНІЙ історії цієї розмови, яку стиснуто в підсумок: точні команди, тексти помилок, "
