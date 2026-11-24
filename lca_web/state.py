@@ -1030,6 +1030,7 @@ class State(rx.State):
         from agent import servers
         self.server_names = servers.names()
         A.migrate_legacy()                                      # вкладення зі старого місця (<репо>/.attachments)
+        topics.migrate_legacy()                                 # теми чату зі старого місця (<код>/.chat_topics)
         self.gpu_enabled = bool(d.get("gpu_monitor", True))
         self.gpu_port = str(d.get("gpu_monitor_port") or "8001")
         self.llm_host, self.llm_port = d.get("llm_host", ""), str(d.get("llm_port", ""))

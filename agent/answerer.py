@@ -11,7 +11,11 @@ from pathlib import Path
 from . import config
 from .llm import OllamaClient
 from .project import load_project_doc, scan_structure
-from .tools import read_file
+from .tools import read_file as _read_raw, text_for_model
+
+
+def read_file(p) -> str:
+    return text_for_model(_read_raw(p))
 
 SYSTEM = (
     "You are a code analysis assistant for a local project. Use the provided context "

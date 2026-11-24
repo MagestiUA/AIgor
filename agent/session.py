@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -95,8 +96,23 @@ def new_session(title: str, project_root: str | Path, permissions: dict | None =
 
 
 def save_session(s: Session, base: str | Path | None = None) -> Path:
+    """Атомарно: пишемо поруч у .tmp і підміняємо. Збій посеред запису не має зіпсувати JSON з усією історією чату."""
     p = _dir(base) / f"{s.id}.json"
-    p.write_text(json.dumps(asdict(s), ensure_ascii=False, indent=2), encoding="utf-8")
+    data = json.dumps(asdict(s), ensure_ascii=False, indent=2)
+    tmp = p.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(data, encoding="utf-8")
+        for attempt in range(5):
+            try:
+                os.replace(tmp, p)
+                break
+            except PermissionError:                 # Windows: файл на мить тримає антивірус/індексатор — повторюємо
+                if attempt == 4:
+                    raise
+                time.sleep(0.05 * (attempt + 1))
+    except OSError:
+        tmp.unlink(missing_ok=True)
+        p.write_text(data, encoding="utf-8")        # запасний шлях: як раніше, напряму
     return p
 
 

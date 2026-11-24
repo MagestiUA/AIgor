@@ -19,11 +19,32 @@ from . import config
 
 
 def read_file(path: str | Path) -> str:
-    return Path(path).read_text(encoding="utf-8")
+    """Вміст файлу З ОРИГІНАЛЬНИМИ закінченнями рядків (newline=""). Звичайний read_text перетворює \\r\\n на \\n,
+    а write_text на Windows — \\n на \\r\\n: через це кожен записаний Ігорем файл мовчки ставав CRLF, а match_style
+    ніколи не бачив CRLF в оригіналі. Для показу моделі нормалізуйте через text_for_model()."""
+    with open(path, encoding="utf-8", newline="") as f:
+        return f.read()
+
+
+def text_for_model(text: str) -> str:
+    """Текст для моделі/пошуку: лише \\n (моделі пишуть \\n; стиль оригіналу повертає match_style при записі)."""
+    return text.replace("\r\n", "\n")
 
 
 def write_file(path: str | Path, content: str) -> None:
-    Path(path).write_text(content, encoding="utf-8")
+    """Записати рівно ті символи, що передано (без перетворення \\n → \\r\\n на Windows)."""
+    with open(path, "w", encoding="utf-8", newline="") as f:
+        f.write(content)
+
+
+CRLF_SUFFIXES = (".bat", ".cmd")         # нові файли цих типів — з CRLF (cmd.exe спотикається на LF у мітках/goto)
+
+
+def new_file_style(path: str | Path, content: str) -> str:
+    """Закінчення рядків для НОВОГО файлу: як написала модель (\\n), окрім .bat/.cmd."""
+    if str(path).lower().endswith(CRLF_SUFFIXES) and "\r\n" not in content:
+        return content.replace("\n", "\r\n")
+    return content
 
 
 BACKUP_ROOT = Path.home() / ".local-code-agent" / "backups"

@@ -14,13 +14,15 @@
      сесії, (в) повний вміст ПОТОЧНОЇ релевантної теми (код підставляє напряму,
      без покладання на те, що модель сама викличе тул за нею).
 
-Ім'я з крапкою в назві теки — щоб Reflex dev-watcher не тригерив hot-reload при
-записі файлів (той самий гача, що й .attachments — див. attachments.py).
+Теми лежать у ПРОФІЛІ користувача (~/.local-code-agent/topics), як і вкладення: раніше — у теці коду
+(<репо>/.chat_topics), а в зібраній exe (PyInstaller onefile) це тимчасова тека розпакування, яку видаляють на виході,
+тож теми губились після перезапуску. Старі теми копіює migrate_legacy() на старті застосунку.
 """
 from __future__ import annotations
 
 import json
 import re
+import shutil
 from pathlib import Path
 
 from . import config
@@ -28,8 +30,27 @@ from . import limits
 from .convo import _is_empty_echo, _strip_echoed_label, notify_compress
 from .llm import OllamaClient
 
-TOPICS_ROOT = Path(__file__).resolve().parent.parent / ".chat_topics"
+TOPICS_ROOT = Path.home() / ".local-code-agent" / "topics"
+LEGACY_ROOT = Path(__file__).resolve().parent.parent / ".chat_topics"      # старе місце (у теці коду)
 TOPIC_BUDGET_CHARS = 96_000     # ~30k токенів (евристика ~3.2 симв./токен) — можна збільшити
+
+
+def migrate_legacy() -> int:
+    """Скопіювати теми зі старого місця (лише відсутні в профілі; оригінали не чіпаємо). -> скільки скопійовано.
+    Викликається при старті застосунку (не при імпорті — тести не чіпають реальні теки)."""
+    if not LEGACY_ROOT.is_dir() or LEGACY_ROOT.resolve() == TOPICS_ROOT.resolve():
+        return 0
+    n = 0
+    try:
+        TOPICS_ROOT.mkdir(parents=True, exist_ok=True)
+        for p in LEGACY_ROOT.glob("*.txt"):
+            dst = TOPICS_ROOT / p.name
+            if not dst.exists():
+                shutil.copy2(p, dst)
+                n += 1
+    except OSError:
+        pass
+    return n
 
 _UNSAFE_RE = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 

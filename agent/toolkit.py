@@ -156,7 +156,7 @@ def h_read_file(args, ctx):
     p = _resolve(ctx, args.get("path", ""))
     if not p.is_file():
         return f"файл не знайдено: {args.get('path')}"
-    text = T.read_file(p)
+    text = T.text_for_model(T.read_file(p))
     cap = limits.get().read_chars
     try:
         offset = max(0, int(args.get("offset") or 0))
@@ -207,7 +207,7 @@ def h_read_attachment(args, ctx):
     if not match:
         names = ", ".join(p.name for p in files)
         return f"файл '{q}' не знайдено серед вкладень. Доступні: {names}"
-    text = T.read_file(match)
+    text = T.text_for_model(T.read_file(match))
     chunk_size = limits.get().chunk
     try:
         offset = max(0, int(args.get("offset") or 0))
@@ -258,6 +258,8 @@ def h_write_file(args, ctx):
     note = ""
     if p.is_file():                         # перезапис: зберегти стиль відступів/кінців рядків
         content, note = T.match_style(T.read_file(p), content, p.name)
+    else:
+        content = T.new_file_style(p, content)
     T.backup_file(p)
     T.write_file(p, content)
     return f"записано {p.name} ({len(content)} символів)" + (f" [{note}]" if note else "")

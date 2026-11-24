@@ -55,9 +55,10 @@ def run_edit(path: str | Path, instruction: str,
              project_doc: str | None = None) -> EditResult:
     client = client or OllamaClient()
     original = tools.read_file(path)
+    body = tools.text_for_model(original)       # модель бачить \n; CRLF оригіналу повертає match_style
 
     py = _is_python(path)                       # strip літералів і ast-перевірка — лише для .py
-    stripped, mapping = strip_code(original) if py else (original, {})
+    stripped, mapping = strip_code(body) if py else (body, {})
     preamble = f"Project context:\n{project_doc}\n\n" if project_doc else ""
     messages = [
         {"role": "system", "content": SYSTEM},
@@ -79,7 +80,7 @@ def run_edit(path: str | Path, instruction: str,
         if not ok2:
             return EditResult(False, None, "", f"після restore невалідно: {err2}", None)
 
-    if original.endswith("\n") and not final.endswith("\n"):     # _extract_code обрізає кінцевий перенос
+    if body.endswith("\n") and not final.endswith("\n"):         # _extract_code обрізає кінцевий перенос
         final += "\n"
     final, _note = tools.match_style(original, final, str(Path(path).name))
     diff = tools.unified_diff(original, final, str(Path(path).name))
@@ -118,7 +119,7 @@ def run_patch(path: str | Path, instruction: str,
     Нічого не записується, поки всі блоки не застосувалися й результат не пройшов перевірки."""
     client = client or OllamaClient()
     original = tools.read_file(path)
-    body = original.replace("\r\n", "\n")
+    body = tools.text_for_model(original)
     py = _is_python(path)
     stripped, mapping = strip_code(body) if py else (body, {})
     style = tools.detect_indent(body)
@@ -183,8 +184,9 @@ def create_from_source(target: str | Path, source_path: str | Path, instruction:
     переносяться verbatim через strip/restore (модель їх не бачить)."""
     client = client or OllamaClient()
     original = tools.read_file(source_path)
+    body = tools.text_for_model(original)
     py = _is_python(source_path) and _is_python(target)
-    stripped, mapping = strip_code(original) if py else (original, {})
+    stripped, mapping = strip_code(body) if py else (body, {})
     preamble = f"Project context:\n{project_doc}\n\n" if project_doc else ""
     messages = [
         {"role": "system", "content": SYSTEM},
@@ -207,6 +209,9 @@ def create_from_source(target: str | Path, source_path: str | Path, instruction:
         if not ok2:
             return EditResult(False, None, "", f"після restore невалідно: {err2}", None)
 
+    if body.endswith("\n") and not final.endswith("\n"):
+        final += "\n"
+    final, _note = tools.match_style(original, final, str(Path(target).name))   # копія — у стилі джерела (CRLF/відступи)
     diff = tools.unified_diff("", final, str(Path(target).name))
     return EditResult(True, final, diff, "", None)
 
