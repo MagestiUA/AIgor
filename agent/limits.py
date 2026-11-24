@@ -19,7 +19,7 @@ from dataclasses import dataclass
 class Limits:
     chunk: int          # символів за один read_attachment (пагінація)
     inline: int         # сумарний розмір вкладень, що вшиваємо в повідомлення без тулів
-    summary: int        # бюджет підсумку розмови (convo.update_summary)
+    summary: int        # бюджет підсумку розмови (convo.compact_tail); частка — межа дослівного хвоста
     digest: int         # бюджет дайджесту великого файлу
     topic: int          # бюджет нотатки теми (chat)
     history_msgs: int   # скільки останніх повідомлень чату йде в контекст

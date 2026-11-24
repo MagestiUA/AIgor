@@ -1,21 +1,21 @@
 """Контекст-памʼять розмови — компактний підсумок зробленого, що подається в
-наступні запити (передусім планувальнику). НЕ повний транскрипт: після кожного
-завершеного запиту дописуємо стислий «епізод» (LLM), а коли підсумок переростає
-бюджет — стискаємо його (LLM). Так модель пов'язує кроки розмови, а контекст не
-роздуває 65k вікна.
+наступні запити (передусім планувальнику), плюс ДОСЛІВНИЙ хвіст свіжих реплік.
+Підсумок оновлюється «ліниво» (compact_tail): лише коли хвіст переріс межу, його
+найстаріші репліки стискаються одним викликом моделі; коли переростає бюджет сам
+підсумок — стискаємо його (LLM). Повна розмова лишається у файлі сесії (recall_history).
 
-Бюджет ~10k токенів ≈ ~32k символів (евристика ~3.2 символи/токен для UA+коду).
+Бюджети — limits.get() (summary, digest), залежать від вікна моделі.
 
 Два РІЗНІ профілі стиснення:
-  code/answer/shell-режими — `summarize_turn`/`compress_summary` (kind="code"):
+  code/answer/shell-режими — `compact_tail`/`compress_summary` (kind="code"):
     орієнтовані на файли/функції/рішення — нерелевантно для аналітичних розмов.
   chat-режим — ті самі функції з kind="chat": фокус на тезах, фактах, ланцюжках
     подій/причин-наслідків розмови, без коду-специфічних рамок.
 
-Окремо — `update_digest`: для ВЕЛИКИХ вкладень, що читаються частинами
-(read_attachment-пагінація). Замість накопичення сирих шматків у контексті,
-кожен прочитаний шматок одразу зливається в один файл-памʼять (~30k токенів),
-зберігаючи деталі й ланцюжки подій, а не просто список фактів.
+Окремо — `update_digest`: для ВЕЛИКИХ вкладень (більших за limits.inline), що читаються
+частинами. Замість накопичення сирих шматків у контексті кожен прочитаний шматок
+зливається в один дайджест, зберігаючи деталі й ланцюжки подій; сам файл лишається
+на диску й читається тулом без втрат.
 """
 from __future__ import annotations
 
@@ -104,18 +104,6 @@ def generate_title(user_text: str, client: OllamaClient | None = None, kind: str
     return title
 
 
-def summarize_turn(user_text: str, outcome: str, client: OllamaClient | None = None,
-                   kind: str = "code") -> str:
-    """Стислий епізод одного запиту (що просили + що зроблено). kind="code"|"chat"."""
-    client = client or OllamaClient()
-    user = f"Запит користувача:\n{user_text}\n\nЩо зроблено:\n{outcome}"
-    msg = client.chat(
-        [{"role": "system", "content": _EPISODE_SYSTEM[kind]}, {"role": "user", "content": user}],
-        profile=_profile_for(kind),
-    )
-    return (msg.get("content") or "").strip()
-
-
 def compress_summary(summary: str, client: OllamaClient | None = None, kind: str = "code") -> str:
     """Стиснути переповнений підсумок, зберігши конкретні факти. kind="code"|"chat"."""
     client = client or OllamaClient()
@@ -126,29 +114,105 @@ def compress_summary(summary: str, client: OllamaClient | None = None, kind: str
     return (msg.get("content") or "").strip()
 
 
-def update_summary(summary: str, user_text: str, outcome: str,
-                   client: OllamaClient | None = None, budget: int | None = None,
-                   kind: str = "code", on_compress=None) -> str:
-    """Дописати епізод поточного запиту; стиснути, якщо вийшли за бюджет
-    (budget None -> limits.get().summary, залежить від бекенда)."""
-    budget = budget or limits.get().summary
-    ep = summarize_turn(user_text, outcome, client, kind=kind)
-    if not ep:
-        return summary
-    new = (summary + "\n- " + ep).strip() if summary else "- " + ep
-    if len(new) > budget:
-        before = len(new)
-        new = compress_summary(new, client, kind=kind)
-        notify_compress(on_compress, "підсумок розмови", before, len(new))
-    return new
-
-
 def as_context(summary: str) -> str:
     """Блок підсумку для підстановки в запит (порожній рядок, якщо нема)."""
     if not summary:
         return ""
     from .history import HINT        # модель має ЗНАТИ, що деталі стисненої розмови можна дістати тулом
     return f"Контекст попередньої розмови (підсумок зробленого):\n{summary}\n({HINT})\n\n"
+
+
+# ── «Лінивий» підсумок: останні репліки дослівно, стискаємо лише те, що випадає з вікна ─────────────────────────
+# Раніше після КОЖНОГО запиту йшов окремий виклик моделі (summarize_turn), навіть коли вікно майже порожнє, а свіжі
+# репліки потрапляли в контекст уже переказаними. Тепер (як автостиснення в Claude Code): підсумок покриває повідомлення
+# до Session.summary_upto, усе після — «хвіст», що йде в контекст ДОСЛІВНО (dialogue_tail). Коли хвіст переростає межу
+# (кількість/символи), найстаріші його репліки стискаються ОДНИМ викликом (compact_tail), а свіжі лишаються дослівно.
+TAIL_KINDS = ("text", "answer", "plan", "step", "note")
+NOTE_PREFIXES = ("⛔", "⚠", "💭")          # примітки, що несуть факт (невдача кроку, звірка, рішення планувальника)
+PER_MSG, PER_STEP, PER_NOTE = 2500, 800, 300
+TAIL_MAX, TAIL_KEEP = 12, 6                # код-режим: хвіст до 12 змістовних повідомлень; при стисненні лишаємо 6 свіжих
+
+
+def _tail_line(m: dict) -> str:
+    kind, c = m.get("kind", "text"), (m.get("content") or "").strip()
+    if kind == "step":
+        return "Крок виконано: " + (c if len(c) <= PER_STEP else c[:PER_STEP] + "…")
+    if kind == "note":
+        return "Примітка: " + c[:PER_NOTE]
+    who = "Користувач" if m.get("role") == "user" else "Асистент"
+    return f"{who}: {c if len(c) <= PER_MSG else c[:PER_MSG] + '…'}"
+
+
+def tail_items(messages: list[dict], start: int = 0, kinds: tuple = TAIL_KINDS) -> list[tuple[int, dict]]:
+    """Змістовні повідомлення з позиції start: репліки, плани, результати кроків, примітки-факти (kinds — які типи)."""
+    out = []
+    for i, m in enumerate(messages):
+        if i < start or m.get("role") not in ("user", "assistant") or not (m.get("content") or "").strip():
+            continue
+        kind = m.get("kind", "text")
+        if kind not in kinds or (kind == "note" and not m["content"].lstrip().startswith(NOTE_PREFIXES)):
+            continue
+        out.append((i, m))
+    return out
+
+
+def dialogue_tail(messages: list[dict], start: int = 0, skip_current: bool = True) -> str:
+    """Дослівний хвіст розмови після підсумку (для контексту запиту). skip_current — без поточного повідомлення
+    користувача (воно йде окремо як задача)."""
+    msgs = list(messages)
+    if skip_current:
+        while msgs and msgs[-1].get("role") == "user":
+            msgs.pop()
+    items = tail_items(msgs, start)
+    if not items:
+        return ""
+    return ("Недавня розмова дослівно (після підсумку; для розуміння поточного повідомлення):\n"
+            + "\n\n".join(_tail_line(m) for _, m in items) + "\n\n")
+
+
+_SPAN_SYSTEM = {
+    "code": (
+        "You compress SEVERAL consecutive turns of a coding session (user requests, assistant answers, executed steps) "
+        "into short factual bullet lines for future context: which files were created/changed, functions/classes "
+        "added or modified, key decisions, results of checks/tests, what the user asked, open threads. Be terse — no "
+        "fluff, no restating code. Same language as the content."
+    ),
+    "chat": _EPISODE_SYSTEM["chat"].replace("ONE turn", "SEVERAL consecutive turns"),
+}
+
+
+def compact_tail(summary: str, messages: list[dict], upto: int, client, *, max_msgs: int, max_chars: int,
+                 keep: int, budget: int, kind: str = "code", on_compress=None,
+                 kinds: tuple = TAIL_KINDS) -> tuple[str, int]:
+    """Якщо дослівний хвіст (після upto) задовгий — стиснути його найстаріші репліки (лишивши keep свіжих) ОДНИМ
+    викликом і дописати в підсумок; підсумок понад budget — стиснути. Інакше — нічого не робити (без виклику моделі).
+    -> (новий підсумок, новий upto). Збій/порожня відповідь моделі — нічого не змінюємо (спробуємо наступного разу)."""
+    items = tail_items(messages, upto, kinds)
+    chars = sum(len(_tail_line(m)) for _, m in items)
+    if len(items) <= max_msgs and chars <= max_chars:
+        return summary, upto
+    drop = items[:-keep] if keep and len(items) > keep else (items if not keep else items[:1])
+    if not drop:
+        return summary, upto
+    text = "\n\n".join(_tail_line(m) for _, m in drop)
+    if len(text) > 60_000:                                  # сам запит стискача мусить вміститись
+        text = text[:30_000] + "\n…\n" + text[-30_000:]
+    client = client or OllamaClient()
+    try:
+        msg = client.chat([{"role": "system", "content": _SPAN_SYSTEM.get(kind, _SPAN_SYSTEM["code"])},
+                           {"role": "user", "content": text}], profile=_profile_for(kind))
+        ep = (msg.get("content") or "").strip()
+    except Exception:                                       # noqa: BLE001 — підсумок не критичний
+        logs.get("context").exception("стиснення хвоста розмови не вдалось")
+        return summary, upto
+    if not ep:
+        return summary, upto
+    new = (summary + "\n- " + ep).strip() if summary else "- " + ep
+    if len(new) > budget:
+        before = len(new)
+        new = compress_summary(new, client, kind=kind) or new
+        notify_compress(on_compress, "підсумок розмови", before, len(new))
+    return new, drop[-1][0] + 1
 
 
 # ── Дайджест великого вкладення (читання частинами) ─────────────────────────

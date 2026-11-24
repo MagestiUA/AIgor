@@ -20,46 +20,86 @@ from agent import limits
 limits.FORCE = limits.LOCAL   # не залежати від налаштувань користувача
 
 
+def msgs(n: int, start: int = 0) -> list[dict]:
+    out = []
+    for i in range(start, start + n):
+        out += [{"role": "user", "content": f"запит {i}", "kind": "text"},
+                {"role": "assistant", "content": f"відповідь {i}", "kind": "answer"}]
+    return out
+
+
+class Spy(Stub):
+    def chat(self, messages, tools=None, profile=None, fmt=None):
+        self.system, self.sent = messages[0]["content"], messages[-1]["content"]
+        return super().chat(messages, tools, profile, fmt)
+
+
 def main() -> None:
-    # перший епізод -> підсумок з пункту
-    s = convo.update_summary("", "додай функцію", "створено f() у a.py",
-                             client=Stub(["створено f() у a.py"]))
-    assert s == "- створено f() у a.py", repr(s)
-
-    # другий епізод дописується
-    s = convo.update_summary(s, "виклич f", "додано виклик f() у a.py",
-                             client=Stub(["додано виклик f() у a.py"]))
-    assert "створено f()" in s and "додано виклик" in s
-    assert s.count("- ") == 2
-
-    # перевищення бюджету -> стиснення (стаб вертає короткий стиск)
-    big = "x" * 50  # епізод
-    s2 = convo.update_summary("y" * 40000, "щось", "результат",
-                              client=Stub([big, "СТИСНУТО"]), budget=1000)
-    assert s2 == "СТИСНУТО", repr(s2)
-
-    # порожній епізод -> підсумок без змін
-    s3 = convo.update_summary("- наявне", "пусто", "", client=Stub([""]))
-    assert s3 == "- наявне"
+    kw = dict(max_msgs=12, max_chars=10_000, keep=6, budget=1000)
+    # «лінивий» підсумок: поки хвіст малий — БЕЗ виклику моделі, підсумок і межа не змінюються
+    class Boom:
+        def chat(self, *a, **k):
+            raise AssertionError("модель не мала викликатись")
+    m = msgs(5)                                            # 10 повідомлень < 12
+    assert convo.compact_tail("", m, 0, Boom(), **kw) == ("", 0)
+    # хвіст переріс межу (16 > 12) → ОДИН виклик стискає найстаріші, 6 свіжих лишаються дослівно
+    m = msgs(8)
+    sp = Spy(["- запити 0-4: зроблено"])
+    s, upto = convo.compact_tail("", m, 0, sp, **kw)
+    assert s.startswith("- ") and s.endswith("запити 0-4: зроблено"), repr(s)
+    assert upto == 10 and len(convo.tail_items(m, upto)) == 6, upto
+    assert "запит 0" in sp.sent and "відповідь 4" in sp.sent and "запит 5" not in sp.sent
+    assert "SEVERAL" in sp.system and ("files" in sp.system.lower())
+    # дослівний хвіст для контексту: після межі, без поточного повідомлення користувача
+    tail = convo.dialogue_tail(m + [{"role": "user", "content": "поточне", "kind": "text"}], upto)
+    assert "запит 5" in tail and "відповідь 7" in tail and "запит 4" not in tail and "поточне" not in tail
+    # результати кроків і примітки-факти теж у хвості; службові примітки — ні
+    extra = [{"role": "assistant", "content": "**крок 1**\n\nстворено a.py", "kind": "step"},
+             {"role": "assistant", "content": "⛔ Крок #2 не завершено", "kind": "note"},
+             {"role": "assistant", "content": "🗜 Стиснув контекст", "kind": "note"},
+             {"role": "assistant", "content": "Готово ✓", "kind": "note"}]
+    t2 = convo.dialogue_tail(extra, 0)
+    assert "Крок виконано: **крок 1**" in t2 and "⛔ Крок #2" in t2 and "Стиснув" not in t2 and "Готово" not in t2
+    # чат: лише репліки (рядки «🔧 тул» не рахуються)
+    assert len(convo.tail_items(extra + msgs(1), 0, kinds=("text", "answer"))) == 2
+    # підсумок понад бюджет → стиснення + сповіщення; збій моделі — нічого не змінюємо
+    ev: list = []
+    s2, up2 = convo.compact_tail("y" * 2000, msgs(8), 0, Stub(["епізод", "СТИСНУТО"]),
+                                 on_compress=lambda w, b, a: ev.append((w, b, a)), **kw)
+    assert s2 == "СТИСНУТО" and up2 == 10 and ev and ev[0][0] == "підсумок розмови", (s2, ev)
+    assert convo.compact_tail("- було", msgs(8), 0, Stub([""]), **kw) == ("- було", 0)          # порожній епізод
+    class Down:
+        def chat(self, *a, **k):
+            raise RuntimeError("модель лежить")
+    assert convo.compact_tail("- було", msgs(8), 0, Down(), **kw) == ("- було", 0)
+    # задовгий хвіст за символами (мало повідомлень, але великі) теж стискається
+    big = [{"role": "user", "content": "x" * 3000, "kind": "text"} for _ in range(5)]
+    assert convo.compact_tail("", big, 0, Stub(["е"]), max_msgs=12, max_chars=5000, keep=2, budget=1000)[1] == 3
+    # стара сесія без summary_upto: її підсумок уже покриває всю розмову
+    import tempfile
+    from pathlib import Path
+    from agent import session as S
+    d = Path(tempfile.mkdtemp())
+    old = S.new_session("т", "")
+    old.messages = msgs(3)
+    old.context_summary = "- давнє"
+    S.save_session(old, base=d)
+    import json as _json
+    raw = _json.loads((d / f"{old.id}.json").read_text(encoding="utf-8"))
+    raw.pop("summary_upto")
+    (d / f"{old.id}.json").write_text(_json.dumps(raw, ensure_ascii=False), encoding="utf-8")
+    assert S.load_session(old.id, base=d).summary_upto == 6
 
     # as_context
     assert convo.as_context("") == ""
     assert "підсумок" in convo.as_context("- щось")
 
-    # kind="chat" використовує ОКРЕМИЙ (не кодинг-орієнтований) промпт — перевіряємо,
-    # що системний промпт дійсно різний для code/chat (а не просто ігнорується kind).
-    captured = {}
-    class CapturingStub:
-        def chat(self, messages, tools=None, profile=None, fmt=None):
-            captured["system"] = messages[0]["content"]
-            return {"content": "епізод"}
-    convo.summarize_turn("питання", "відповідь", client=CapturingStub(), kind="chat")
-    chat_sys = captured["system"]
-    convo.summarize_turn("питання", "відповідь", client=CapturingStub(), kind="code")
-    code_sys = captured["system"]
-    assert chat_sys != code_sys
-    assert "files" not in chat_sys.lower() and "function" not in chat_sys.lower()
-    assert "files" in code_sys.lower() or "functions" in code_sys.lower()
+    # kind="chat" використовує ОКРЕМИЙ (не кодинг-орієнтований) промпт
+    sp_chat, sp_code = Spy(["е"]), Spy(["е"])
+    convo.compact_tail("", msgs(8), 0, sp_chat, kind="chat", **kw)
+    convo.compact_tail("", msgs(8), 0, sp_code, kind="code", **kw)
+    assert sp_chat.system != sp_code.system
+    assert "files" not in sp_chat.system.lower() and "function" not in sp_chat.system.lower()
 
     # update_digest: перший шматок -> дайджест; другий шматок + дайджест -> новий дайджест
     d1 = convo.update_digest("", "шматок 1: подія А сталась через Б",
@@ -101,26 +141,20 @@ def main() -> None:
     assert t_empty == "", repr(t_empty)
 
     # сповіщення про стиснення (побажання розробників): колбек викликається РІВНО коли
-    # відбувся стискаючий прохід — для підсумку розмови та дайджесту файлу
+    # відбувся стискаючий прохід — для дайджесту файлу (для підсумку розмови — вище)
     ev: list = []
     cb = lambda what, b, a: ev.append((what, b, a))
-    convo.update_summary("y" * 5000, "щось", "результат", client=Stub(["епізод", "СТИСНУТО"]),
-                         budget=1000, on_compress=cb)
-    assert ev and ev[0][0] == "підсумок розмови" and ev[0][1] > 1000 and ev[0][2] == len("СТИСНУТО"), ev
-    ev.clear()
-    convo.update_summary("", "коротко", "ок", client=Stub(["епізод"]), budget=1000, on_compress=cb)
-    assert ev == [], "без переповнення сповіщення не потрібне"
     convo.update_digest("x" * 200, "шматок", client=Stub(["y" * 5000, "СТИСНУТО"]), budget=1000, on_compress=cb)
     assert ev and ev[0][0] == "дайджест файлу" and ev[0][2] == len("СТИСНУТО"), ev
     ev.clear()
     convo.update_digest("", "шматок", client=Stub(["короткий дайджест"]), budget=1000, on_compress=cb)
     assert ev == []
     # збій колбека не ламає стиснення
-    assert convo.update_summary("y" * 5000, "щось", "р", client=Stub(["е", "СТИСНУТО"]), budget=1000,
-                                on_compress=lambda *a: 1 / 0) == "СТИСНУТО"
+    assert convo.compact_tail("y" * 2000, msgs(8), 0, Stub(["е", "СТИСНУТО"]), on_compress=lambda *a: 1 / 0,
+                              **kw)[0] == "СТИСНУТО"
 
-    print("OK: convo — епізоди, дописування, стиснення за бюджетом, порожній епізод, as_context, "
-          "chat/code kind різні промпти, update_digest шматків, generate_title (чиста/echo/задовга/порожня)")
+    print("OK: convo — лінивий підсумок (без виклику, поки хвіст малий; один виклик на найстаріші), дослівний хвіст, "
+          "бюджет і сповіщення, стара сесія, chat/code промпти, update_digest шматків, generate_title")
 
 
 if __name__ == "__main__":

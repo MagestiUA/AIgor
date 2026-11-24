@@ -383,6 +383,8 @@ class State(rx.State):
     queued_text: str = ""                  # повідомлення, що чекає, поки модель зайнята
     stopping: bool = False                 # стоп запитано, чекаємо переривання
     context_summary: str = ""              # контекст-памʼять розмови (підсумок)
+    summary_upto: int = 0                  # підсумок покриває messages[:summary_upto]; далі — дослівний хвіст
+    _exec_tail: str = ""                   # хвіст розмови на момент старту плану (для контексту кроків; backend-only)
     compress_log: list[dict] = []          # історія стискань контексту цієї сесії
     activity: list[dict[str, str]] = []    # жива стрічка: запити до моделі й виклики тулів (під катом)
     activity_last: str = ""                # ISO-час останньої події (годинник «N с тому» на клієнті)
@@ -621,7 +623,7 @@ class State(rx.State):
         _ = self.llm_rev                                      # перерахунок після збереження налаштувань (вікно/бекенд)
         lim = limits.get()
         chat = self.mode == "chat"
-        msgs = [dict(m) for m in self.messages]
+        msgs = [dict(m) for m in self.messages][self.summary_upto:]    # старіші — у підсумку, у вікні лише хвіст
         _ = self.attachments                                  # перерахунок при зміні чипів
         cid = self.current_id
         names = A.list_text(cid) if cid else []
@@ -751,6 +753,7 @@ class State(rx.State):
         self.has_pending = False
         self.queued_text = ""
         self.context_summary = ""
+        self.summary_upto = 0
         self.compress_log = []
         self.activity = []
         self.session_topics = []
@@ -829,6 +832,7 @@ class State(rx.State):
         self.messages = [{"thinking": "", "attachments": [], "thumbs": [], **m} for m in s.messages]
         self.has_pending = s.pending_plan is not None
         self.context_summary = s.context_summary
+        self.summary_upto = s.summary_upto
         self.compress_log = list(s.compressions)
         self.activity = []
         self.session_topics = list(s.topics)
@@ -1536,10 +1540,12 @@ class State(rx.State):
     def _step_context(self, plan, step, root: str, att_note: str) -> str:
         """Контекст кроку: загальна задача + ПОВНИЙ план із результатами вже виконаних кроків
         і змінених файлів (render_for_planner) — кроки бачать, що зробили попередні, а не
-        лише галочки. Підсумок розмови та вкладення — як і раніше."""
-        ctx = (f"Project root: {root}\n{self._roots_note()}\nЗагальна задача: {plan.task}\n"
-               f"План і результати вже виконаних кроків (ти виконуєш ЛИШЕ крок #{step.id}):\n"
-               f"{render_for_planner(plan)}")
+        лише галочки; підсумок і свіжий хвіст розмови, нотатки, вкладення.
+
+        ПОРЯДОК — під кеш префікса (vLLM prefix caching / llama.cpp): спершу стабільне між кроками (тека, режим, карта,
+        підсумок, нотатки, хвіст розмови, вкладення), наприкінці — змінне (задача й план із результатами, що оновлюються
+        після кожного кроку). Інакше зміна плану змушувала б модель заново обробляти карту й підсумок на кожному кроці."""
+        ctx = f"Project root: {root}\n{self._roots_note()}"
         if self.edits == "auto":                          # режим самостійних правок: виправляй, а не лише описуй
             ctx = orch.AUTONOMY_NOTE + "\n\n" + ctx
         pmap = projectmap.context_block(root)             # свіжа: попередній крок міг змінити файли
@@ -1550,8 +1556,14 @@ class State(rx.State):
         notes = sessionmem.index_block(self.current_id)       # нотатки сесії: лише індекс, зміст — тулом recall
         if notes:
             ctx += "\n\n" + notes
+        tail = getattr(self, "_exec_tail", "")
+        if tail:
+            ctx += "\n\n" + tail.strip()
         if att_note:
             ctx += "\n" + att_note
+        ctx += (f"\n\nЗагальна задача: {plan.task}\n"
+                f"План і результати вже виконаних кроків (ти виконуєш ЛИШЕ крок #{step.id}):\n"
+                f"{render_for_planner(plan)}")
         return ctx
 
     def _save_pending(self, plan) -> None:
@@ -1597,6 +1609,10 @@ class State(rx.State):
         async with self:
             cid = self.current_id
             att_note = self._attachments_note()    # шляхи файлів; виконавець читає read_file
+            # хвіст розмови після підсумку — знімок на старті плану (далі в чат ідуть самі кроки цього плану)
+            tail = convo.dialogue_tail(list(getattr(self, "messages", []) or []), getattr(self, "summary_upto", 0))
+            cap = max(2000, limits.get().summary // 4)
+            self._exec_tail = tail if len(tail) <= cap else "…" + tail[-cap:]
         stop_ev = _STOP_EVENTS.get(cid)
         stopped = False
         failed = None
@@ -2137,8 +2153,10 @@ class State(rx.State):
             proj_id = self.chat_project_id
             imgs = self._recent_image_urls()
             cur_atts = list(self.messages[-1].get("attachments", []) or []) if self.messages else []
+            # старіші репліки — у підсумку (раніше він рахувався, але в промпт чату не йшов), свіжі — дослівно
+            summary = self.context_summary
             history = [{"role": m["role"], "content": m["content"]}
-                       for m in self.messages
+                       for m in self.messages[self.summary_upto:]
                        if m["role"] in ("user", "assistant")
                        and m.get("kind", "text") in ("text", "answer") and m["content"]][-limits.get().history_msgs:]
         proj = CP.load_project(proj_id) if proj_id else None
@@ -2160,7 +2178,8 @@ class State(rx.State):
         topics_note = topics.available_topics_note(all_topics)
         # project_block ПЕРШИМ — інструкції проекту задають рамку розмови, тема й
         # вкладення йдуть як додатковий контекст усередині цієї рамки.
-        system = project_block + CHAT_SYSTEM + ("\n\n" + topics_note if topics_note else "")
+        system = (project_block + CHAT_SYSTEM + ("\n\n" + topics_note if topics_note else "")
+                  + ("\n\n" + convo.as_context(summary).strip() if summary else ""))
         if imgs and history and history[-1]["role"] == "user":      # зображення — до поточної репліки користувача
             history[-1] = {**history[-1], "images": imgs}
         msgs = [{"role": "system", "content": system}] + history
@@ -2246,27 +2265,32 @@ class State(rx.State):
                     self.sessions = sess.list_sessions()
 
     async def _update_summary(self, user_text: str, outcome: str):
-        """Оновлення контекст-памʼяті (LLM-підсумок) після завершеного запиту. Модель
-        однопотокова, тож це триває в межах busy; нові повідомлення стають у чергу
-        (queued_text) і виконаються після — вже зі свіжим стисненим контекстом.
-        cid-гард: якщо користувач перемкнув чат, пишемо в сесію-походження."""
+        """Контекст-пам'ять після завершеного запиту — «ліниво»: свіжі репліки лишаються в контексті ДОСЛІВНО (хвіст після
+        summary_upto), а підсумок оновлюється ОДНИМ викликом лише тоді, коли хвіст переріс межу (convo.compact_tail).
+        Раніше — виклик моделі після КОЖНОГО запиту. Модель однопотокова, тож це в межах busy; нові повідомлення стають
+        у чергу. cid-гард: якщо користувач перемкнув чат, пишемо в сесію-походження. Теми чату (спільна пам'ять між
+        чатами) — як і раніше, після кожного ходу: чат може закінчитись раніше, ніж хвіст переросте межу."""
         if not (outcome or "").strip():
             return
         client = await asyncio.to_thread(get_client)
         async with self:
-            cur = self.context_summary
             cid = self.current_id
             chat = self.mode == "chat"
-            kind = "chat" if chat else "code"
             cur_topics = list(self.session_topics)
-        # chat: загальний підсумок розмови менше потрібен у деталях (деталі живуть у
-        # темах нижче) — зменшуємо бюджет умовно втричі, як домовлено з користувачем.
-        budget = limits.get().summary // 3 if chat else limits.get().summary
+        if not cid:
+            return
+        lim = limits.get()
+        s0 = await asyncio.to_thread(lambda: sess.load_session(cid))
+        if chat:   # чат: хвіст = вікно історії; загальний підсумок менш детальний (деталі — у темах), бюджет утричі менший
+            kw = dict(max_msgs=lim.history_msgs, max_chars=lim.summary // 2, keep=max(4, lim.history_msgs // 2),
+                      budget=lim.summary // 3, kind="chat", kinds=("text", "answer"))
+        else:
+            kw = dict(max_msgs=convo.TAIL_MAX, max_chars=lim.summary // 4, keep=convo.TAIL_KEEP, budget=lim.summary,
+                      kind="code")
         events: list[tuple] = []
         note_cb = lambda w, b, a: events.append((w, b, a, ""))     # noqa: E731
-        new = await asyncio.to_thread(
-            lambda: convo.update_summary(cur, user_text, outcome, client, budget=budget, kind=kind,
-                                         on_compress=note_cb))
+        new, upto = await asyncio.to_thread(
+            lambda: convo.compact_tail(s0.context_summary, s0.messages, s0.summary_upto, client, on_compress=note_cb, **kw))
         new_topics = cur_topics
         if chat:
             new_topics = await asyncio.to_thread(
@@ -2277,12 +2301,11 @@ class State(rx.State):
         async with self:
             if self.current_id == cid:                # та сама сесія — оновити й у State
                 self.context_summary = new
+                self.summary_upto = upto
                 self.session_topics = new_topics
-            if cid:                                   # у файл — завжди в сесію-походження
-                s = sess.load_session(cid)
-                s.context_summary = new
-                s.topics = new_topics
-                sess.save_session(s)
+            s = sess.load_session(cid)                # у файл — завжди в сесію-походження
+            s.context_summary, s.summary_upto, s.topics = new, upto, new_topics
+            sess.save_session(s)
 
     def _apply_compress_events(self, cid: str, events: list[tuple]) -> None:
         """Подія стиснення -> нотатка в чаті (якщо ця сесія відкрита) + запис в історію
@@ -2459,7 +2482,7 @@ class State(rx.State):
             summary = self.context_summary
             att_note = self._attachments_note()     # шляхи прикріплених файлів (модель читає сама)
             last_ai = orch.last_assistant_text(self.messages)      # ПОВНА попередня відповідь (не підсумок)
-            dialogue = orch.recent_dialogue(self.messages)         # останні репліки діалогу (не лише підсумок)
+            dialogue = convo.dialogue_tail(self.messages, self.summary_upto)   # репліки після підсумку — дослівно
             answering = self.has_question
             if answering:
                 self.has_question = False

@@ -34,6 +34,7 @@ class Session:
     pending_plan: dict | None = None                    # план, що очікує виконання
     pending_question: dict | None = None                  # питання планувальника, що очікує відповіді
     context_summary: str = ""                             # стислий підсумок розмови (контекст-памʼять)
+    summary_upto: int = 0                                 # підсумок покриває messages[:summary_upto]; далі — дослівний хвіст
     topics: list = field(default_factory=list)            # назви тем (chat), що траплялись у цій сесії
     project_id: str = ""                                  # chat-проект (chat_projects.py), "" — жодного
     compressions: list = field(default_factory=list)      # історія стиснень контексту [{what,before,after,name,ts}]
@@ -118,6 +119,8 @@ def save_session(s: Session, base: str | Path | None = None) -> Path:
 
 def load_session(sid: str, base: str | Path | None = None) -> Session:
     data = json.loads((_dir(base) / f"{sid}.json").read_text(encoding="utf-8"))
+    if "summary_upto" not in data and data.get("context_summary"):
+        data["summary_upto"] = len(data.get("messages") or [])   # стара сесія: її підсумок уже покриває всю розмову
     return Session(**data)
 
 
