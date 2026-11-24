@@ -60,7 +60,12 @@ def main() -> None:
     r = deliberate("?", client=DecisionStub([
         {"action": "nonsense", "steps": [{"kind": "inline", "description": "тривіально"}]},
     ]))
-    assert r["action"] == "plan" and r["state"].steps[0].kind == "inline"
+    assert r["action"] == "plan" and r["state"].steps[0].kind == "note"          # старе inline → note
+    assert r["state"].steps[0].is_noop
+    # старі типи кроків читаються як нові: llm/deterministic → act; невідомий → act
+    from agent.planner import norm_kind
+    assert [norm_kind(k) for k in ("llm", "deterministic", "inline", "act", "note", "wat", None)] == \
+        ["act", "act", "note", "act", "note", "act", "act"]
 
     print("OK: deliberate — clarify/choose/plan, нормалізація опцій, fallback, невідомий action")
 

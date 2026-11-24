@@ -40,7 +40,7 @@ from agent.steploop import LoopHooks
 from agent.answerer import build_context
 from agent.stepreview import check_consistency
 from agent import stepreview as review
-from agent.intent import classify_intent
+from agent.intent import quick_route
 from agent.llm import OllamaClient
 from agent.memory import render_for_planner, render_for_user
 from agent.planner import deliberate
@@ -2465,7 +2465,7 @@ class State(rx.State):
                 self.has_question = False
                 self.status = "Обмірковую відповідь…"
             else:
-                self.status = "Думаю…" if chat_mode else "Визначаю тип запиту…"
+                self.status = "Думаю…" if chat_mode else "Обмірковую запит…"
 
         client = await asyncio.to_thread(get_client)
         su, so = text, ""
@@ -2481,42 +2481,40 @@ class State(rx.State):
         else:
             approved = orch.expand_confirmation(text, last_ai)      # «роби» = виконай щойно запропоноване
             if approved:
-                mode, task_text = "edit", approved
+                task_text, quick = approved, "edit"
                 su = f"{text} (виконати запропоноване: {last_ai[:160]}…)"
                 async with self:
                     self._append("assistant", "▶ Сприймаю це як команду виконати те, що щойно було запропоновано.", "note")
             else:
                 task_text = text
-                mode = await asyncio.to_thread(
-                    lambda: classify_intent(text, client, context=orch.context_for_intent(last_ai),
-                                            autonomous=autonomous, has_attachments=bool(att_note)))
-            if mode == "answer":
+                quick = quick_route(text, autonomous=autonomous, has_attachments=bool(att_note))   # однозначне — без моделі
+
+            async def answer() -> str:
                 async with self:
                     self.status = "Аналізую код…"
                 ctx = await asyncio.to_thread(lambda: build_context(root, refs, text))
-                so = await self._answer_reply(text, convo.as_context(summary) + dialogue + pmap + ctx,
-                                              att_note, root, client)
-            elif mode == "shell":
-                async with self:
-                    self.status = "Виконую запит…"
-                ctx = self._exec_ctx(root, client)
-                rn = self._roots_note()
-                shell_ctx = (f"Project root: {root}\n{rn}{pmap}{convo.as_context(summary)}" if summary
-                             else f"Project root: {root}\n{rn}{pmap}")
-                if att_note:
-                    shell_ctx += "\n" + att_note
-                final, _ = await self._run_tool_step(text, ctx, context=shell_ctx,
-                                                     stop_event=_STOP_EVENTS.get(self.current_id))
-                so = final or "виконано дії інструментами"
-            else:  # plan / edit -> планувальник-діалог
-                async with self:
-                    self.status = "Обмірковую план…"
+                return await self._answer_reply(text, convo.as_context(summary) + dialogue + pmap + ctx,
+                                                att_note, root, client)
+
+            if quick == "answer":
+                so = await answer()
+            else:
+                # ОДИН виклик планувальника і визначає тип запиту (answer / shell), і планує (раніше — окремий
+                # класифікатор наміру перед ним). «роби» й лог помилки в auto — одразу планування, без маршрутизації.
                 doc = await asyncio.to_thread(lambda: load_project_doc(root))
                 struct = await asyncio.to_thread(lambda: scan_structure(root))
-                su2, so = await self._deliberate_flow(
-                    task_text, (orch.AUTONOMY_NOTE + "\n\n" if autonomous else "") + convo.as_context(summary) + dialogue
-                    + pmap + struct, doc, [], root, plan_first, client)
-                su = su2 if not approved else su
+                ctx_plan = ((orch.AUTONOMY_NOTE + "\n\n" if autonomous else "") + convo.as_context(summary) + dialogue
+                            + pmap + struct)
+                result = await self._decide(task_text, ctx_plan, doc, [], route=not quick, autonomous=autonomous,
+                                            client=client)
+                if result["action"] == "answer":
+                    so = await answer()
+                elif result["action"] == "shell":
+                    so = await self._shell_reply(text, root, pmap, summary, att_note, client)
+                else:
+                    su2, so = await self._handle_decision(result, task_text, ctx_plan, doc, [], root,
+                                                          plan_first or result.get("wait", False), client)
+                    su = su2 if not approved else su
 
         if (so or "").strip():
             await self._maybe_auto_title(text, client)
@@ -2565,18 +2563,42 @@ class State(rx.State):
         return await self._deliberate_flow(task, q.get("context", ""), q.get("doc"),
                                            history, root, plan_first, client)
 
-    async def _deliberate_flow(self, task: str, context: str, doc, history: list,
-                               root: str, plan_first: bool, client):
-        """Один хід планувальника-діалогу: clarify/choose -> питання+кнопки (пауза);
-        plan -> готовий план (виконати або показати на підтвердження).
-        Повертає (task, outcome) — outcome='' якщо пауза/не виконано (підсумок не потрібен)."""
+    async def _shell_reply(self, text: str, root: str, pmap: str, summary: str, att_note: str, client) -> str:
+        """«Просто запусти» (планувальник обрав shell): один крок виконавця без плану."""
         async with self:
+            self.status = "Виконую запит…"
+        ctx = self._exec_ctx(root, client)
+        rn = self._roots_note()
+        shell_ctx = f"Project root: {root}\n{rn}{pmap}{convo.as_context(summary)}"
+        if att_note:
+            shell_ctx += "\n" + att_note
+        final, _ = await self._run_tool_step(text, ctx, context=shell_ctx, stop_event=_STOP_EVENTS.get(self.current_id))
+        return final or "виконано дії інструментами"
+
+    async def _decide(self, task: str, context: str, doc, history: list, route: bool = False,
+                      autonomous: bool = False, client=None) -> dict:
+        """Один виклик планувальника (planner.deliberate). route=True — він же визначає тип запиту (answer/shell)."""
+        async with self:
+            self.status = "Обмірковую запит…" if route else "Обмірковую план…"
             att_note = self._attachments_note()
             imgs = self._recent_image_urls()
+        client = client or await asyncio.to_thread(get_client)
         full_context = (context + "\n\n" + att_note).strip() if att_note else context
         kw = {"images": imgs} if imgs else {}
-        result = await asyncio.to_thread(
-            lambda: deliberate(task, full_context, client, doc, history, **kw))
+        return await asyncio.to_thread(
+            lambda: deliberate(task, full_context, client, doc, history, route=route, autonomous=autonomous,
+                               has_attachments=bool(att_note), **kw))
+
+    async def _deliberate_flow(self, task: str, context: str, doc, history: list,
+                               root: str, plan_first: bool, client):
+        """Один хід планувальника-діалогу (продовження після відповіді на його питання): рішення + обробка.
+        Повертає (task, outcome) — outcome='' якщо пауза/не виконано (підсумок не потрібен)."""
+        result = await self._decide(task, context, doc, history, client=client)
+        return await self._handle_decision(result, task, context, doc, history, root, plan_first, client)
+
+    async def _handle_decision(self, result: dict, task: str, context: str, doc, history: list,
+                               root: str, plan_first: bool, client):
+        """clarify/choose -> питання+кнопки (пауза); plan -> готовий план (виконати або показати на підтвердження)."""
         action = result["action"]
 
         if action in ("clarify", "choose"):

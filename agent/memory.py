@@ -19,7 +19,7 @@ REPORT_IN_PLAN = 400      # скільки символів фактів кро�
 @dataclass
 class Step:
     id: int
-    kind: str                 # llm | deterministic | inline
+    kind: str                 # act | note (у старих збережених планах: llm/deterministic = act, inline = note)
     description: str
     target: str | None = None
     status: str = "pending"   # pending | done | failed
@@ -27,13 +27,16 @@ class Step:
     report: str = ""          # точні факти кроку: команда → вивід, змінені файли (agent/stepreview.facts_report)
 
     @property
+    def is_note(self) -> bool:
+        return self.kind in ("note", "inline")
+
+    @property
     def is_noop(self) -> bool:
-        """`inline` без файлу-цілі — справді тривіальний крок, нічого виконувати. Якщо ж у inline-кроку
-        є target, планувальник помилково назвав правку файлу «тривіальною» — виконуємо як `llm`
-        (інакше крок мовчки помічався б виконаним, а файл лишався незмінним). Так само, якщо в описі є дієслово зміни
-        («додати імпорт…», «виправити…»): модель інколи позначає реальну правку як inline без цілі — виконуємо."""
+        """Примітка (`note`) без файлу-цілі — справді нічого виконувати. Якщо ж у неї є target, планувальник помилково
+        назвав правку файлу приміткою — виконуємо (інакше крок мовчки помічався б виконаним, а файл лишався незмінним).
+        Так само, якщо в описі є дієслово зміни («додати імпорт…», «виправити…») — виконуємо."""
         from .orchestration import wants_change
-        return self.kind == "inline" and not (self.target or "").strip() and not wants_change(self.description)
+        return self.is_note and not (self.target or "").strip() and not wants_change(self.description)
 
 
 @dataclass
@@ -91,7 +94,7 @@ def render_for_planner(state: TaskState) -> str:
     lines = [f"Задача: {state.task}", "", "План:"]
     for s in state.steps:
         tgt = f" ({s.target})" if s.target else ""
-        lines.append(f"  {mark.get(s.status, '[ ]')} #{s.id} [{s.kind}]{tgt}: {s.description}")
+        lines.append(f"  {mark.get(s.status, '[ ]')} #{s.id}{' [примітка]' if s.is_noop else ''}{tgt}: {s.description}")
         if s.result:
             lines.append(f"        -> {s.result}")
         if s.report:                                     # точні команди й вивід — стисло, щоб не роздувати контекст
@@ -116,7 +119,8 @@ def render_for_user(state: TaskState) -> str:
     for s in state.steps:
         tgt = f" · `{s.target}`" if s.target else ""
         head, *subs = _SUBSTEP.split(s.description.strip())
-        out.append(f"{icon.get(s.status, '⬜')} **#{s.id}** `{s.kind}`{tgt} — {head.strip()}")
+        mark = "📝" if s.is_noop else icon.get(s.status, "⬜")
+        out.append(f"{mark} **#{s.id}**{tgt} — {head.strip()}")
         for sub in subs:
             out.append("    - " + _NUM.sub("", sub.strip()))
         if s.result:

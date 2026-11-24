@@ -171,7 +171,7 @@ def apply_decision(plan, dec: Decision, current_id: int, allow_change: bool) -> 
             st.status = "pending"                    # повторимо цей крок за новим описом
         changed = True
     for text in dec.add_steps:
-        plan.add_step("llm", text)
+        plan.add_step("act", text)
         changed = True
     return changed
 
