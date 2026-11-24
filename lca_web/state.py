@@ -38,11 +38,9 @@ from agent.agent_loop import is_incomplete, _estimate_iters, _looks_like_leaked_
 from agent.agent_loop import summarize_history
 from agent.steploop import LoopHooks
 from agent.answerer import build_context
-from agent.stepreview import check_consistency
-from agent import stepreview as review
+from agent.plan_runner import PlanEnv, PlanRunner, StepRun, tail_for_plan
 from agent.intent import quick_route
-from agent.llm import OllamaClient
-from agent.memory import render_for_planner, render_for_user
+from agent.memory import render_for_user
 from agent.planner import deliberate
 from agent.project import load_project_doc, scan_structure
 from agent.project_info import git_info
@@ -360,6 +358,36 @@ class _ReadHooks(_UIHooks):
         return shown
 
 
+class _PlanUI:
+    """Адаптер ядра виконання плану (agent.plan_runner.PlanRunner) до Reflex-стану: статус, повідомлення в чат,
+    збереження очікуваного плану, коментарі користувача по ходу, ОДИН крок — через _run_tool_step (картки активності,
+    підтвердження shell, проміжні перевірки)."""
+
+    def __init__(self, st, cid: str, ctx, stop_event):
+        self.st, self.cid, self.ctx, self.stop_event = st, cid, ctx, stop_event
+
+    async def status(self, text: str) -> None:
+        async with self.st:
+            self.st.status = text
+
+    async def say(self, content: str, kind: str = "note") -> None:
+        async with self.st:
+            self.st._append("assistant", content, kind)
+
+    async def save_pending(self, plan) -> None:
+        async with self.st:
+            self.st._save_pending(plan)
+
+    def take_live_notes(self) -> list[str]:
+        return _take_live_notes(self.cid)
+
+    async def run_step(self, step_text: str, *, title: str, context: str, checkpoint=None) -> StepRun:
+        final, log = await self.st._run_tool_step(step_text, self.ctx, title=title, context=context,
+                                                  stop_event=self.stop_event, checkpoint=checkpoint)
+        async with self.st:
+            return StepRun(final, log, list(self.st._step_touched), list(self.st._step_actions))
+
+
 class State(rx.State):
     sessions: list[dict] = []
     mode: str = "code"                     # активний режим: "code" (агент) | "chat" (легкий чат)
@@ -384,7 +412,6 @@ class State(rx.State):
     stopping: bool = False                 # стоп запитано, чекаємо переривання
     context_summary: str = ""              # контекст-памʼять розмови (підсумок)
     summary_upto: int = 0                  # підсумок покриває messages[:summary_upto]; далі — дослівний хвіст
-    _exec_tail: str = ""                   # хвіст розмови на момент старту плану (для контексту кроків; backend-only)
     compress_log: list[dict] = []          # історія стискань контексту цієї сесії
     activity: list[dict[str, str]] = []    # жива стрічка: запити до моделі й виклики тулів (під катом)
     activity_last: str = ""                # ISO-час останньої події (годинник «N с тому» на клієнті)
@@ -1537,35 +1564,6 @@ class State(rx.State):
             self.confirm_open = False
         return _CONFIRMS.pop(self.current_id, {}).get("ok", False)
 
-    def _step_context(self, plan, step, root: str, att_note: str) -> str:
-        """Контекст кроку: загальна задача + ПОВНИЙ план із результатами вже виконаних кроків
-        і змінених файлів (render_for_planner) — кроки бачать, що зробили попередні, а не
-        лише галочки; підсумок і свіжий хвіст розмови, нотатки, вкладення.
-
-        ПОРЯДОК — під кеш префікса (vLLM prefix caching / llama.cpp): спершу стабільне між кроками (тека, режим, карта,
-        підсумок, нотатки, хвіст розмови, вкладення), наприкінці — змінне (задача й план із результатами, що оновлюються
-        після кожного кроку). Інакше зміна плану змушувала б модель заново обробляти карту й підсумок на кожному кроці."""
-        ctx = f"Project root: {root}\n{self._roots_note()}"
-        if self.edits == "auto":                          # режим самостійних правок: виправляй, а не лише описуй
-            ctx = orch.AUTONOMY_NOTE + "\n\n" + ctx
-        pmap = projectmap.context_block(root)             # свіжа: попередній крок міг змінити файли
-        if pmap:
-            ctx += "\n\n" + pmap
-        if self.context_summary:
-            ctx += f"\n{convo.as_context(self.context_summary)}"
-        notes = sessionmem.index_block(self.current_id)       # нотатки сесії: лише індекс, зміст — тулом recall
-        if notes:
-            ctx += "\n\n" + notes
-        tail = getattr(self, "_exec_tail", "")
-        if tail:
-            ctx += "\n\n" + tail.strip()
-        if att_note:
-            ctx += "\n" + att_note
-        ctx += (f"\n\nЗагальна задача: {plan.task}\n"
-                f"План і результати вже виконаних кроків (ти виконуєш ЛИШЕ крок #{step.id}):\n"
-                f"{render_for_planner(plan)}")
-        return ctx
-
     def _save_pending(self, plan) -> None:
         """Зберегти план (зі статусами) як очікуваний: «Виконати» продовжить з першого
         невиконаного кроку. Викликати всередині `async with self`."""
@@ -1592,202 +1590,18 @@ class State(rx.State):
                     self.queued_text = (self.queued_text + "\n\n" + txt).strip() if self.queued_text else txt
 
     async def _execute_steps_inner(self, plan, root: str, client):
-        """Виконати кроки плану через per-step tool-loop: модель сама обирає тули
-        (read/write/edit/run_shell), ми лише показуємо її дії та diff у чаті.
-
-        Керування (фідбек розробників):
-          * кроки бачать результати попередніх (render_for_planner), а не лише галочки;
-          * виконані кроки пропускаємо — так план ВІДНОВЛЮЄТЬСЯ з місця зупинки;
-          * невдалий крок (зациклився / ліміт / контекст) ЗУПИНЯЄ план і лишає його як
-            очікуваний («Виконати» повторить з цього кроку), а не будує далі на зламаному;
-          * після останнього кроку — звірка (_verify_plan): синтаксис змінених файлів +
-            перевірка узгодженості, з обмеженим повтором проблемного кроку.
-
-        ToolContext: edits=auto (план уже схвалено — через plan_first або edits=auto).
-        shell передаємо як є; для shell=ask confirm показує модальний попап."""
+        """Виконати план: уся логіка — в ядрі агента (agent.plan_runner.PlanRunner: кроки, перегляд планувальником,
+        зупинка/відновлення, звірка, підсумок); тут — лише середовище (PlanEnv) і адаптер до стану (_PlanUI).
+        ToolContext: edits=auto (план уже схвалено — через plan_first або edits=auto); shell — як у сесії."""
         ctx = self._exec_ctx(root, client)
         async with self:
             cid = self.current_id
-            att_note = self._attachments_note()    # шляхи файлів; виконавець читає read_file
-            # хвіст розмови після підсумку — знімок на старті плану (далі в чат ідуть самі кроки цього плану)
-            tail = convo.dialogue_tail(list(getattr(self, "messages", []) or []), getattr(self, "summary_upto", 0))
-            cap = max(2000, limits.get().summary // 4)
-            self._exec_tail = tail if len(tail) <= cap else "…" + tail[-cap:]
-        stop_ev = _STOP_EVENTS.get(cid)
-        stopped = False
-        failed = None
-        final = ""
-        touched_by_step: dict[int, list[str]] = {}
-        total = len(plan.steps)
-        done_before = sum(1 for s in plan.steps if s.status == "done")
-        if 0 < done_before < total:
-            nxt = next(s for s in plan.steps if s.status != "done")
-            async with self:
-                self._append("assistant", f"▶ Продовжую план з кроку #{nxt.id} (виконано {done_before} з {total}).", "note")
-        replans = 0                                            # скільки разів планувальник уже коригував план
-        while True:
-            step = next((s for s in plan.steps if s.status != "done"), None)   # план може рости/мінятись
-            if step is None:
-                break
-            total = len(plan.steps)
-            if stop_ev is not None and stop_ev.is_set():       # перервано між кроками
-                stopped = True
-                break
-            async with self:
-                self.status = f"Крок #{step.id}/{total}: {step.description[:50]}"
-            if step.is_noop:
-                plan.set_result(step.id, "done", "inline")
-                continue
-            cp_holder: dict = {"notes": [], "dec": None}
-
-            async def checkpoint(acts, _step=step, _h=cp_holder):
-                """Проміжний звіт планувальнику посеред кроку: точні факти дій на цей момент."""
-                live = _take_live_notes(cid)
-                if live:
-                    _h["notes"] += live
-                    plan.facts["коментарі користувача"] = " | ".join(
-                        [x for x in [plan.facts.get("коментарі користувача", "")] if x] + [n[:300] for n in live])[-600:]
-                _step.report = review.facts_report(acts)
-                may_cp = bool(live) or replans < review.MAX_REPLANS
-                dec = await self._review_after_step(plan, _step, None, "", client, may_cp, live)
-                if dec.action != "continue":
-                    _h["dec"] = dec
-                return dec
-
-            final, log = await self._run_tool_step(step.description, ctx,
-                                                   title=step.description[:60],
-                                                   context=self._step_context(plan, step, root, att_note),
-                                                   stop_event=stop_ev,
-                                                   checkpoint=checkpoint if len(plan.steps) > 1 else None)
-            ok = bool(log) and not is_incomplete(final)
-            plan.set_result(step.id, "done" if ok else "failed", final or "—")
-            async with self:
-                files = list(self._step_touched)
-                actions = list(self._step_actions)
-            step.report = review.facts_report(actions)         # точні факти: команда → вивід, файли
-            if files:
-                touched_by_step[step.id] = files
-                plan.facts["змінені файли"] = ", ".join(dict.fromkeys(
-                    f for fl in touched_by_step.values() for f in fl))[:500]
-            more = any(s.status != "done" for s in plan.steps)
-            notes = cp_holder["notes"] + _take_live_notes(cid)  # коментарі користувача, написані під час кроку
-            if cp_holder["notes"]:
-                notes = list(dict.fromkeys(notes))
-            if notes:
-                plan.facts["коментарі користувача"] = " | ".join(
-                    [x for x in [plan.facts.get("коментарі користувача", "")] if x] + [n[:300] for n in notes])[-600:]
-            if (((len(plan.steps) > 1 and (more or not ok)) or notes)
-                    and not (stop_ev is not None and stop_ev.is_set())):
-                may = bool(notes) or replans < review.MAX_REPLANS      # коментар користувача обмеженням не глушимо
-                dec = cp_holder["dec"] or await self._review_after_step(plan, step, ok, final, client, may, notes)
-                if review.apply_decision(plan, dec, step.id, may):
-                    replans += 1
-                    if step.status == "pending":               # невдалий крок переписано — пробуємо знову
-                        continue
-                if (not ok and dec.action == "continue" and dec.comment and (final or "").strip()
-                        and not is_incomplete(final) and not step.report.strip()):
-                    # Крок без жодної дії (напр. «виправ помилки, якщо є» — помилок нема): правило «без дій = невдача»
-                    # ловить вигадане виконання, але планувальник бачив факти (дій не було) і текст виконавця й прийняв
-                    # крок («continue» з поясненням). Ліміт/зациклення/контекст сюди не потрапляють (is_incomplete).
-                    plan.set_result(step.id, "done", final)
-                    ok = True
-                if dec.action == "stop" and ok:
-                    async with self:
-                        self._save_pending(plan)
-                    return render_for_planner(plan)
-            if not ok:
-                failed = step
-                break
-
-        if failed is not None:
-            async with self:
-                self._append("assistant",
-                             f"⛔ Крок #{failed.id} не завершено: {(final or '—')[:240]}\n\nРешту кроків призупинено, "
-                             "щоб не будувати на зламаному. Натисніть «Виконати» — продовжу з цього кроку, "
-                             "або «Відхилити».", "note")
-                self._save_pending(plan)
-            return render_for_planner(plan)
-
-        verify_note = ""
-        if stopped:
-            if any(s.status != "done" for s in plan.steps):
-                async with self:
-                    self._save_pending(plan)              # можна відновити кнопкою «Виконати»
-        elif touched_by_step:
-            verify_note = await self._verify_plan(plan, root, client, ctx, touched_by_step, stop_ev, att_note)
-        report = ""
-        if not stopped and sum(1 for s in plan.steps if not s.is_noop) >= 2:
-            async with self:
-                self.status = "Готую підсумок…"
-            report = await asyncio.to_thread(lambda: review.final_summary(plan, client, verify_note))
-        async with self:
-            if report:                                              # що саме зроблено, а не лише «Готово»
-                self._append("assistant", "**Підсумок виконання**\n\n" + report, "answer")
-            self._append("assistant", "⛔ Зупинено — решту можна продовжити кнопкою «Виконати»" if stopped
-                         else "Готово ✓", "note")
-        return render_for_planner(plan) + (f"\n{verify_note}" if verify_note else "")
-
-    async def _review_after_step(self, plan, step, ok: bool, final: str, client, may_change: bool,
-                                 user_notes: list[str] | None = None):
-        """Планувальник дивиться на ТОЧНІ факти кроку (команди й вивід) і вирішує: далі / скоригувати / зупинитись.
-        Його коротке пояснення виходить у чат («що сталося, що далі»). Збій моделі → просто «далі»."""
-        async with self:
-            self.status = f"Планувальник оцінює крок #{step.id}…"
-        try:
-            dec = await asyncio.to_thread(lambda: review.review_step(
-                render_for_planner(plan), step, ok, final, step.report, client, user_notes))
-        except Exception as e:                                  # планувальник не критичний — не валимо виконання
-            _log.warning("перегляд плану після кроку #%s не вдався: %s", step.id, e)
-            return review.Decision()
-        if not may_change and dec.action == "revise":
-            dec.action = "continue"
-        if dec.comment:
-            async with self:
-                self._append("assistant", f"💭 {dec.comment}", "note")
-        return dec
-
-    async def _verify_plan(self, plan, root: str, client, ctx, touched_by_step: dict, stop_ev, att_note: str) -> str:
-        """Звірка після всіх кроків: (1) змінені .py компілюються; (2) LLM-перевірка узгодженості
-        кроків (stepreview.check_consistency). Проблему виправляємо ПОВТОРОМ одного кроку з
-        уточненням — не більше 2 раундів, щоб не крутитись. Повертає рядок для підсумку."""
-        def all_files() -> list[str]:
-            return list(dict.fromkeys(f for fl in touched_by_step.values() for f in fl))
-
-        async with self:
-            self.status = "Перевіряю результат…"
-            self._append("assistant", "🔍 Перевіряю результат: синтаксис змінених файлів і узгодженість кроків…", "note")
-        for _ in range(2):
-            bad = await asyncio.to_thread(lambda: orch.syntax_report(root, all_files()))
-            if bad:
-                path, msg = bad[0]
-                note = f"У файлі {path} синтаксична помилка: {msg}. Виправ її, не ламаючи решту."
-                step_id = orch.pick_step(touched_by_step, [p for p, _ in bad])
-            else:
-                plan.facts["синтаксис"] = "ок (змінені .py компілюються)"
-                verdict = await asyncio.to_thread(lambda: check_consistency(plan, client))
-                step_id = verdict.get("step_id")
-                if verdict["ok"] or not any(s.id == step_id for s in plan.steps):
-                    async with self:
-                        self._append("assistant", "✓ Звірка пройшла: кроки узгоджені, змінені файли без синтаксичних помилок.", "note")
-                    return "Звірка: ок."
-                note = verdict.get("note") or "узгодь результат кроків"
-            step = next((s for s in plan.steps if s.id == step_id), plan.steps[-1])
-            async with self:
-                self._append("assistant", f"⚠ Звірка: {note[:300]}\n\nПовторюю крок #{step.id}.", "note")
-            final, log = await self._run_tool_step(
-                step.description + f"\nУточнення після перевірки: {note}", ctx,
-                title=f"повтор: {step.description[:50]}",
-                context=self._step_context(plan, step, root, att_note), stop_event=stop_ev)
-            plan.set_result(step.id, "done" if (log and not is_incomplete(final)) else "failed", final or "—")
-            async with self:
-                touched_by_step.setdefault(step.id, []).extend(self._step_touched)
-        bad = await asyncio.to_thread(lambda: orch.syntax_report(root, all_files()))
-        if bad:
-            async with self:
-                self._append("assistant", f"⚠ Після повторів лишилась синтаксична помилка у {bad[0][0]}: {bad[0][1]}. "
-                                          "Перегляньте вручну.", "note")
-            return f"Звірка: лишилась помилка у {bad[0][0]}."
-        return "Звірка: проблеми виправлено повтором."
+            env = PlanEnv(root=root, roots_note=self._roots_note(), autonomous=self.edits == "auto",
+                          summary=self.context_summary, session_id=cid,
+                          # хвіст розмови після підсумку — знімок на старті плану (далі в чат ідуть самі кроки плану)
+                          tail=tail_for_plan(convo.dialogue_tail(list(self.messages), self.summary_upto)),
+                          att_note=self._attachments_note())
+        return await PlanRunner(_PlanUI(self, cid, ctx, _STOP_EVENTS.get(cid)), client, env).execute(plan)
 
     def _exec_ctx(self, root: str, client) -> ToolContext:
         """ToolContext для виконання: edits=auto (план/запит уже схвалено). Підтвердження
