@@ -7,7 +7,7 @@ from agent.orchestration import touched_paths
 from agent.stepreview import facts_report
 from agent.toolkit import ToolContext, default_registry
 
-limits.FORCE = limits.LOCAL
+limits.FORCE = limits.production()
 
 
 def main() -> None:

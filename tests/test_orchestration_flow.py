@@ -18,7 +18,7 @@ from agent import stepreview as review
 from agent.agent_loop import ITER_LIMIT_MSG
 from agent.memory import TaskState
 
-limits.FORCE = limits.LOCAL
+limits.FORCE = limits.production()
 CID = "sid-test"
 
 

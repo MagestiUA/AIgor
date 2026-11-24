@@ -17,7 +17,7 @@ class Stub:
 
 
 from agent import limits
-limits.FORCE = limits.LOCAL   # не залежати від налаштувань користувача
+limits.FORCE = limits.production()   # не залежати від налаштувань користувача
 
 
 def msgs(n: int, start: int = 0) -> list[dict]:

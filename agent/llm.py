@@ -44,7 +44,6 @@ def _ollama_messages(messages: list[dict]) -> list[dict]:
 class OllamaClient:
     def __init__(self, model: str = config.MODEL, host: str = config.HOST):
         self.model = model
-        self.single_model = False       # True: ігнорувати model/num_ctx профілів (див. _eff)
         self.host = host.rstrip("/")
         self.last_stats: dict = {}      # stats останнього chat() — для лічильника токенів
         self.last_error: str = ""       # остання помилка з'єднання (діагностика)
@@ -119,21 +118,18 @@ class OllamaClient:
 
     # ── Запит ───────────────────────────────────────────────────────────────
     def _eff(self, profile: dict) -> tuple[str, int]:
-        """(модель, num_ctx) для виклику. Звичайний режим — з профілю ролі (як було). single_model=True (локальний режим
-        застосунку) — ОДНА модель для всіх ролей і вікно з налаштувань (limits), тож локальна модель працює за тими ж
-        правилами/бюджетами, що й серверна."""
-        if self.single_model:
-            from . import limits
-            return self.model, limits.get().context_tokens
-        return profile.get("model") or self.model, profile["num_ctx"]
+        """(модель, num_ctx) для виклику: ОДНА модель для всіх ролей і вікно з налаштувань (limits), тож локальна модель
+        працює за тими ж правилами/бюджетами, що й серверна. Не варіюємо num_ctx між викликами — інакше Ollama
+        перевантажує модель."""
+        from . import limits
+        return self.model, limits.get().context_tokens
 
     def chat(self, messages: list[dict], tools: list | None = None,
              profile: dict = config.EXECUTOR, fmt: str | dict | None = None) -> dict:
         """Один виклик /api/chat. Повертає message (dict) з полями
         content / thinking / tool_calls (за наявності).
         fmt="json" або JSON-schema -> примусово валідний JSON у content.
-        Модель беремо з profile["model"], якщо є (EXECUTOR/PLANNER можуть мати різні
-        моделі) — інакше дефолт клієнта (self.model)."""
+        Модель — self.model (одна на всі ролі); профіль задає лише думання/температуру/семплінг."""
         model, num_ctx = self._eff(profile)
         payload = {
             "model": model,

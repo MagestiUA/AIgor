@@ -1,28 +1,21 @@
 """Константи й профілі агента.
 
-Профілі ролей, кожен зі своєю моделлю (за нашим бенчмарком — Qwen3-Coder сильніша
-саме в кодингу, gemma4 краще тримає якість на максимальному контексті й для
-аналітичних/чат-розмов):
-  EXECUTOR      — механічне виконання (tool-loop, КОД): думання ВИМКНЕНО, Qwen3-Coder.
-  PLANNER       — декомпозиція й аналіз (КОД): думання УВІМКНЕНО, gemma4.
-  CHAT_EXECUTOR — той самий think=off/DRY-режим (надійний tool-calling для
-                  read_attachment/read_topic), але для CHAT-режиму — модель gemma4,
-                  НЕ Qwen. Без цього chat-режим випадково тягнув би модель EXECUTOR
-                  (Qwen, призначену для коду) лише тому, що used think=off для
-                  надійного виклику тулів.
-
-num_ctx=131072 — sweet spot за бенчмарком q4_0+flash attention (gemma4 113.5→108.5
-t/s, лише -4% проти 65536; за 262144 падіння вже різке — лишаємо як опцію не дефолт).
-Не варіюємо num_ctx між профілями — інакше Ollama перевантажує модель.
+Профілі ролей — лише РЕЖИМ виклику (думання, температура, семплінг), а не модель: і локально (Ollama), і на сервері
+працює ОДНА модель на всі ролі, а вікно (num_ctx) береться з limits — однакові правила для обох бекендів.
+(Раніше профілі несли ще й власну модель і num_ctx — з часів gemma4 + Qwen3-Coder; у режимі однієї моделі ці поля
+ігнорувались і були лише шумом — CRUTCHES.md B5.)
+  EXECUTOR      — виконання (tool-loop, JSON-рішення планувальника): думання ВИМКНЕНО, DRY проти повторів.
+  PLANNER       — аналіз і відповіді (чат/аналіз коду): думання УВІМКНЕНО.
+  CHAT_EXECUTOR — синонім EXECUTOR (лишився для сумісності викликів).
 """
 from __future__ import annotations
 
 HOST  = "http://127.0.0.1:11434"
-MODEL = "gemma4:26b-a4b-it-qat"   # дефолт OllamaClient; профілі нижче перекривають своїм "model"
 
 # Локальний режим застосунку: ОДНА модель на всі ролі й власний розмір вікна (за бенчмарком, див. LOCAL_CTX нижче).
 LOCAL_MODEL = "hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL"   # те саме сімейство, що на сервері (Qwen3.8-27B)
 LOCAL_CTX = 65536
+MODEL = LOCAL_MODEL               # дефолт OllamaClient (скрипти, тести); застосунок бере модель із налаштувань
 # Швидкий вибір у налаштуваннях: (назва, модель Ollama, вікно). Uncensored — та сама вага, що на сервері, але на 16 ГБ
 # частина шарів іде на CPU, тому вікно менше (замір: 24k ≈ 28 ток/с, 64k ≈ 15–20).
 LOCAL_PRESETS = (
@@ -97,9 +90,7 @@ SHELL_TIMEOUT = 120
 # think=on) лишаємо без DRY. options мерджаться в payload у llm.chat/chat_stream.
 _DRY = {"dry_multiplier": 0.3, "dry_base": 1.75, "dry_allowed_length": 2}
 
-# Профілі ролей: (think, num_ctx, temperature, model, [options])
-EXECUTOR = {"think": False, "num_ctx": 131072, "temperature": 0.2, "options": _DRY,
-            "model": "qwen3-coder-agent:30b"}
-PLANNER  = {"think": True,  "num_ctx": 131072, "temperature": 0.3,
-            "model": MODEL}
-CHAT_EXECUTOR = {**EXECUTOR, "model": MODEL}   # think=off/DRY як EXECUTOR, але gemma4
+# Профілі ролей: режим виклику (модель і вікно — спільні, див. docstring)
+EXECUTOR = {"think": False, "temperature": 0.2, "options": _DRY}
+PLANNER  = {"think": True, "temperature": 0.3}
+CHAT_EXECUTOR = EXECUTOR

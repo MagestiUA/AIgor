@@ -51,9 +51,8 @@ def make_client(settings: dict | None = None):
         from .llm_openai import OpenAIClient
         return OpenAIClient(base_url=cfg["base_url"], model=cfg["model"], api_key=cfg["api_key"])
     from .llm import OllamaClient
-    c = OllamaClient(model=(settings if settings is not None else S.load()).get("llm_model") or config.LOCAL_MODEL)
-    c.single_model = True                      # локально: одна модель на всі ролі, вікно з limits (як на сервері)
-    return c
+    # локально: одна модель на всі ролі, вікно з limits (як на сервері)
+    return OllamaClient(model=(settings if settings is not None else S.load()).get("llm_model") or config.LOCAL_MODEL)
 
 
 def test_connection(base_url: str, api_key: str = "", timeout: float = 15.0) -> tuple[bool, str, list[str]]:

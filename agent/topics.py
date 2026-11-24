@@ -104,7 +104,7 @@ _CLASSIFY_SYSTEM = (
 def classify_topic(user_text: str, outcome: str, existing: list[str],
                    client: OllamaClient | None = None, profile: dict = config.EXECUTOR) -> str:
     """Повертає назву теми (існуючу з existing або нову) для цього ходу розмови.
-    profile: chat-режим передає CHAT_EXECUTOR (gemma) — теми зараз лише для chat."""
+    profile: режим виклику (теми зараз лише для chat)."""
     client = client or OllamaClient()
     topics_list = "\n".join(f"- {t}" for t in existing) if existing else "(немає існуючих тем)"
     user = (f"Існуючі теми:\n{topics_list}\n\nЦей хід розмови:\n"
@@ -138,7 +138,7 @@ def update_topic_note(prev: str, user_text: str, outcome: str,
                       on_compress=None) -> str:
     """Злити новий хід розмови в нотатку теми. Якщо вийшли за бюджет — ще один
     прохід тим самим промптом над самою нотаткою (природно стискає, бо
-    зливає-і-стискає за дизайном). profile: chat-режим передає CHAT_EXECUTOR (gemma)."""
+    зливає-і-стискає за дизайном). profile: режим виклику."""
     client = client or OllamaClient()
     budget = budget or limits.get().topic
     user = f"Поточна нотатка:\n{prev or '(порожньо)'}\n\nНовий хід:\nКористувач: {user_text}\n\nОбговорено: {outcome}"

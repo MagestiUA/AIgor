@@ -8,7 +8,7 @@ from agent.toolkit import ToolContext, default_registry
 
 
 from agent import limits
-limits.FORCE = limits.LOCAL   # не залежати від налаштувань користувача
+limits.FORCE = limits.production()   # не залежати від налаштувань користувача
 
 
 def main() -> None:

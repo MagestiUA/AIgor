@@ -29,23 +29,21 @@ def main() -> None:
     assert "модуль export.py" in ex and "«роби»" in ex and ex.startswith("Виконай те, що ти щойно запропонував")
     assert o.expand_confirmation("роби", "") is None                    # нічого підтверджувати
     assert o.expand_confirmation("роби тести", last) is None            # це нова задача, не згода
-    assert "модуль export.py" in o.context_for_intent(last) and o.context_for_intent("") == ""
-    assert o.context_for_intent("x" * 5000).endswith("…")
 
-    # B: великий план = ≥4 кроків, що виконують дії (inline не рахуємо)
+    # B: великий план = ≥4 кроків, що виконують дії (примітки не рахуємо)
     st = TaskState(task="t")
     for i in range(3):
-        st.add_step("llm", f"крок {i}")
+        st.add_step("act", f"крок {i}")
     assert not o.is_big_plan(st)
-    st.add_step("inline", "нотатка")
+    st.add_step("note", "нотатка")
     assert not o.is_big_plan(st)
-    st.add_step("deterministic", "тести")
+    st.add_step("act", "тести")
     assert o.is_big_plan(st) and not o.is_big_plan(st, threshold=5)
 
-    # inline З файлом-ціллю — це правка, а не нотатка: виконується (регресія: «план без жодного запису»)
+    # примітка З файлом-ціллю — це правка, а не нотатка: виконується (регресія: «план без жодного запису»)
     s_note = st.steps[3]
     assert s_note.is_noop
-    st.add_step("inline", "додати EXPOSE 8080", "Dockerfile")
+    st.add_step("note", "додати EXPOSE 8080", "Dockerfile")
     s_edit = st.steps[-1]
     assert s_edit.target == "Dockerfile" and not s_edit.is_noop
     assert o.is_big_plan(st, threshold=5)
@@ -80,17 +78,17 @@ def main() -> None:
     assert o.wants_discussion("просто питання без вимоги відразу писати код") and o.wants_discussion("Не пиши код поки")
     assert not o.wants_discussion("додай хелс-чек") and not o.wants_discussion("роби")
 
-    # недавній діалог: без поточного повідомлення, без службових кроків/нотаток, з обрізанням
+    # недавній діалог (тепер convo.dialogue_tail): без поточного повідомлення, без службових нотаток, з обрізанням
+    from agent import convo
     dm = [{"role": "user", "content": "q1", "kind": "text"},
           {"role": "assistant", "content": "a1 " + "x" * 3000, "kind": "answer"},
-          {"role": "assistant", "content": "крок", "kind": "step"},
           {"role": "assistant", "content": "нотатка", "kind": "note"},
           {"role": "user", "content": "q2", "kind": "text"}]
-    rd = o.recent_dialogue(dm, per=100)
+    rd = convo.dialogue_tail(dm)
     assert "Користувач: q1" in rd and "Асистент: a1" in rd and "…" in rd
-    assert "q2" not in rd and "крок" not in rd and "нотатка" not in rd
-    assert o.recent_dialogue([{"role": "user", "content": "лише поточне"}]) == ""
-    assert o.recent_dialogue(dm * 5, n=2).count("Користувач:") + o.recent_dialogue(dm * 5, n=2).count("Асистент:") == 2
+    assert "q2" not in rd and "нотатка" not in rd
+    assert convo.dialogue_tail([{"role": "user", "content": "лише поточне"}]) == ""
+    assert o.touched_paths("replace_in_file", {"path": "r.py"}) == ["r.py"]
     print("OK: orchestration — згода/розгортання, великий план, змінені файли, синтаксис, вибір кроку")
 
 

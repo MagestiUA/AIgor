@@ -1,15 +1,12 @@
-"""Відповіді на питання й аналіз коду — read-only, без правок.
-
-Збирає контекст (AGENT.md + структура проекту + згадані у питанні файли +
-read-only джерела) і відповідає через PLANNER-профіль (think on — аналіз).
+"""Контекст для режиму аналізу коду (відповіді на питання, без правок): AGENT.md + структура проєкту + згадані в
+питанні файли + read-only джерела. Сама відповідь — у спільному циклі з тулами читання (lca_web: _answer_reply →
+_run_read_loop), тож модель дочитує решту сама (search / read_file).
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
-from . import config
-from .llm import OllamaClient
 from .project import load_project_doc, scan_structure
 from .tools import read_file as _read_raw, text_for_model
 
@@ -17,12 +14,6 @@ from .tools import read_file as _read_raw, text_for_model
 def read_file(p) -> str:
     return text_for_model(_read_raw(p))
 
-SYSTEM = (
-    "You are a code analysis assistant for a local project. Use the provided context "
-    "(project structure, file contents, AGENT.md) to answer accurately and concisely. "
-    "Cite the relevant file/function when it helps. Do NOT propose code edits unless "
-    "explicitly asked. Answer in the same language as the question."
-)
 
 FILE_RE = re.compile(r"[\w./\\-]+\.[A-Za-z]{1,6}")
 
@@ -56,22 +47,3 @@ def build_context(root: str | Path, reference_files=(), question: str = "",
             pass
 
     return "\n\n".join(parts)
-
-
-def _answer_messages(question: str, context: str) -> list[dict]:
-    user = (f"Контекст:\n{context}\n\n" if context else "") + f"Питання:\n{question}"
-    return [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
-
-
-def answer(question: str, context: str = "", client: OllamaClient | None = None) -> tuple[str, str]:
-    """Повертає (відповідь, роздуми). Роздуми (think on) — для згортання в UI."""
-    client = client or OllamaClient()
-    msg = client.chat(_answer_messages(question, context), profile=config.PLANNER)
-    return (msg.get("content") or "").strip(), (msg.get("thinking") or "").strip()
-
-
-def answer_stream(question: str, context: str = "", client: OllamaClient | None = None):
-    """Стрімова версія answer(): генератор подій llm.chat_stream (PLANNER, think on).
-    Дельти content/thinking + фінальний done зі stats (для живого лічильника)."""
-    client = client or OllamaClient()
-    yield from client.chat_stream(_answer_messages(question, context), profile=config.PLANNER)

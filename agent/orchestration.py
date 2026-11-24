@@ -64,14 +64,6 @@ def expand_confirmation(text: str, last_assistant: str) -> str | None:
             f"Твоя попередня відповідь, яку схвалено:\n\n{last_assistant}")
 
 
-def context_for_intent(last_assistant: str, n: int = 1200) -> str:
-    """Контекст для класифікатора наміру: що було перед короткою реплікою користувача."""
-    if not last_assistant:
-        return ""
-    tail = last_assistant if len(last_assistant) <= n else last_assistant[:n] + "…"
-    return f"Попередня відповідь асистента (для розуміння короткої репліки користувача):\n{tail}"
-
-
 # ── B: великий план ──────────────────────────────────────────────────────────
 BIG_PLAN_STEPS = 4
 
@@ -138,24 +130,8 @@ def looks_like_question(text: str) -> bool:
     return bool(words) and words[0] in _Q_START
 
 
-# ── недавній діалог для режиму «аналіз» і планувальника ─────────────────────
-def recent_dialogue(messages: list[dict], n: int = 6, per: int = 2500) -> str:
-    """Кілька останніх реплік (користувач/асистент: відповіді, плани, тексти) ПЕРЕД поточним
-    повідомленням. Живий кейс: без цього режим «аналіз» не бачив попереднього плану й питання
-    і відповів не на те (плутав із попередньою задачею), а ще перечитував усі файли."""
-    msgs = list(messages)
-    while msgs and msgs[-1].get("role") == "user":
-        msgs.pop()
-    keep = [m for m in msgs if m.get("role") in ("user", "assistant")
-            and m.get("kind", "text") in ("text", "answer", "plan") and (m.get("content") or "").strip()][-n:]
-    if not keep:
-        return ""
-    lines = []
-    for m in keep:
-        who = "Користувач" if m["role"] == "user" else "Асистент"
-        c = m["content"].strip()
-        lines.append(f"{who}: {c if len(c) <= per else c[:per] + '…'}")
-    return "Недавня розмова (для розуміння поточного повідомлення):\n" + "\n\n".join(lines) + "\n\n"
+# Недавній діалог для режиму «аналіз» і планувальника — convo.dialogue_tail (дослівний хвіст після підсумку).
+# Живий кейс: без нього режим «аналіз» не бачив попереднього плану й питання і відповів не на те.
 
 
 # Прямі вказівки «лише обговорюємо» (фідбек: «це було просто питання … без вимоги відразу писати код»)

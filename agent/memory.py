@@ -1,18 +1,15 @@
-"""Стан задачі на диску — структурований, не «LLM-summary».
+"""Стан задачі — структурований, не «LLM-summary».
 
 Ключова ідея: планувальник бачить КОМПАКТНИЙ зріз (план зі статусами + факти +
 стислі результати кроків), а не сиру історію. Так контекст не роздувається й
-переживає перезапуск. Що зберігати — вирішує СХЕМА, а не модель (керована втрата).
+переживає перезапуск (план, що очікує, лежить у сесії). Що зберігати — вирішує СХЕМА, а не модель (керована втрата).
 """
 from __future__ import annotations
 
-import json
 import re
 import time
-from dataclasses import asdict, dataclass, field
-from pathlib import Path
+from dataclasses import dataclass, field
 
-STATE_DIR = ".agent"
 REPORT_IN_PLAN = 400      # скільки символів фактів кроку показуємо у зрізі плану
 
 
@@ -63,28 +60,11 @@ class TaskState:
         return next((s for s in self.steps if s.status == "pending"), None)
 
 
-def state_path(root: str | Path = ".", name: str = "current") -> Path:
-    d = Path(root) / STATE_DIR
-    d.mkdir(exist_ok=True)
-    return d / f"task_{name}.json"
-
-
-def save(state: TaskState, root: str | Path = ".", name: str = "current") -> Path:
-    p = state_path(root, name)
-    p.write_text(json.dumps(asdict(state), ensure_ascii=False, indent=2), encoding="utf-8")
-    return p
-
-
 def state_from_dict(data: dict) -> TaskState:
-    """Відновити TaskState зі словника (для сесій / pending-планів)."""
+    """Відновити TaskState зі словника (план, що очікує виконання, зберігається в сесії — session.pending_plan)."""
     steps = [Step(**s) for s in data.get("steps", [])]
     rest = {k: v for k, v in data.items() if k != "steps"}
     return TaskState(steps=steps, **rest)
-
-
-def load(root: str | Path = ".", name: str = "current") -> TaskState:
-    data = json.loads(state_path(root, name).read_text(encoding="utf-8"))
-    return state_from_dict(data)
 
 
 def render_for_planner(state: TaskState) -> str:

@@ -34,7 +34,7 @@ from agent import logs
 from agent import chat_projects as CP
 from agent import session as sess
 from agent import topics
-from agent.agent_loop import is_incomplete, _estimate_iters, _looks_like_leaked_reasoning
+from agent.agent_loop import is_incomplete, step_iter_limit, _looks_like_leaked_reasoning
 from agent.agent_loop import summarize_history
 from agent.steploop import LoopHooks
 from agent.answerer import build_context
@@ -1670,11 +1670,10 @@ class State(rx.State):
         if imgs:
             umsg["images"] = imgs
         messages = [{"role": "system", "content": EXEC_SYSTEM}, umsg]
-        # сервер: довгу роботу не обмежуємо (стежимо за прогресом, LoopGuard); локальна модель — оцінка
-        max_iters = limits.get().hard_iters or await asyncio.to_thread(
-            lambda: _estimate_iters(step_text, context, client))
+        # довгу роботу не обмежуємо (стежимо за прогресом, LoopGuard); hard_iters — лише запобіжник
         res = await run_loop(messages, registry=reg, ctx=ctx, client=client,
-                             hooks=_UIHooks(self, cid_live, stop_event, checkpoint), cfg=LoopConfig(max_iters=max_iters))
+                             hooks=_UIHooks(self, cid_live, stop_event, checkpoint),
+                             cfg=LoopConfig(max_iters=step_iter_limit()))
         final, full_actions, stats = res.final, res.actions, res.stats
         actions = [(n, r) for n, _a, r in full_actions]
         touched: list[str] = []               # файли, змінені цим кроком (для звірки)
@@ -1901,7 +1900,7 @@ class State(rx.State):
         async with self:
             cid = self.current_id
         hooks = _ReadHooks(self, cid, client, stream=not weak, digest_profile=digest_profile)
-        cfg = LoopConfig(max_iters=max(limits.get().hard_iters or 30, read_floor + 8),
+        cfg = LoopConfig(max_iters=max(step_iter_limit(), read_floor + 8),
                          profile=config.EXECUTOR if weak else config.PLANNER, summarize=False, finalize_on_stuck=True,
                          read_warn=max(READ_WARN, read_floor), read_force=max(READ_FORCE, read_floor + 4),
                          finalize_text=self.CHAT_FINALIZE)
@@ -1945,9 +1944,9 @@ class State(rx.State):
 
     @staticmethod
     def _attach_or_reference(cid: str, content: str, cur_names: list, other_names: list) -> tuple[str, bool]:
-        """Якщо файли цього повідомлення (cur_names) РАЗОМ малі (A.INLINE_BUDGET) —
+        """Якщо файли цього повідомлення (cur_names) РАЗОМ малі (limits.inline) —
         вшити їхній ВМІСТ напряму в текст (один LLM-виклик, без тул-циклу читання).
-        Інакше — лишити посилання на тул read_attachment, як і для other_names.
+        Інакше — лишити посилання на read_file(ім'я), як і для other_names.
         Повертає (новий_текст, чи_лишились_файли_що_потребують_тула)."""
         cur = [n for n in (cur_names or []) if n]
         others = [n for n in (other_names or []) if n]
@@ -2212,10 +2211,10 @@ class State(rx.State):
             att_names = [a["name"] for a in self.attachments if not a.get("error")]
             thumbs = [a["thumb"] for a in self.attachments if not a.get("error") and a.get("thumb")]
             # Великий вставлений/набраний текст у полі вводу не має жодного ліміту
-            # (на відміну від файлових вкладень — MAX_FILE_SIZE) і летить прямо в
+            # (на відміну від файлових вкладень — limits.max_file) і летить прямо в
             # промпт, переповнюючи контекст (живий кейс: 687k символів — модель
             # падає). Той самий ліміт, що й для файлів — понад нього зберігаємо як
-            # вкладення на диск; модель читає частинами через read_attachment, а не
+            # вкладення на диск; модель читає частинами через read_file / шукає search, а не
             # отримує суцільний блок у контексті.
             if len(text) > limits.get().max_file:
                 kb = len(text) // 1024

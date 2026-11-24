@@ -73,8 +73,7 @@ _COMPRESS_SYSTEM = {
 }
 
 
-# kind="chat" -> gemma (CHAT_EXECUTOR), kind="code" -> Qwen (EXECUTOR). Інакше
-# chat-режим випадково обробляв би аналітичний текст кодинг-моделлю.
+# Профіль виклику для стиснення (модель одна на всі ролі — різняться лише промпти code/chat).
 def _profile_for(kind: str) -> dict:
     return config.CHAT_EXECUTOR if kind == "chat" else config.EXECUTOR
 
@@ -259,8 +258,7 @@ def update_digest(digest: str, chunk: str, client: OllamaClient | None = None,
     """Злити новий шматок великого документа в дайджест (файл-памʼять). Якщо
     результат вийшов за бюджет — стиснути ще раз тим самим промптом (він і так
     зливає/стискає, тож повторний прохід над самим дайджестом природно коротшає).
-    profile: за дефолтом EXECUTOR (Qwen, код); chat-режим передає CHAT_EXECUTOR
-    (gemma) — інакше аналітичний текст обробляла б кодинг-модель."""
+    profile: режим виклику (типово EXECUTOR — без роздумів)."""
     client = client or OllamaClient()
     budget = budget or limits.get().digest
     user = (f"Поточний дайджест:\n{digest or '(порожньо — це перший шматок)'}\n\n"

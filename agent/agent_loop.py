@@ -307,36 +307,11 @@ SYSTEM = (
 )
 
 
-_ESTIMATE_SCHEMA = {
-    "type": "object",
-    "properties": {"n": {"type": "integer"}},
-    "required": ["n"],
-}
-_ESTIMATE_SYSTEM = (
-    "You are a planning assistant. Given a task step description, estimate the minimum "
-    "number of tool calls needed to complete it (write_file, run_shell, read_file, etc.). "
-    "Count each file creation/edit as 1, each shell command as 1. Reply ONLY as JSON: {\"n\": <integer>}."
-)
-
-
-def _estimate_iters(step_text: str, context: str, client: OllamaClient,
-                    profile: dict = config.EXECUTOR) -> int:
-    """Спитати модель скільки тул-викликів потрібно для кроку → повернути n*2 (мін 6).
-    profile: chat-режим передає CHAT_EXECUTOR (gemma)."""
-    user = (f"Context:\n{context}\n\n" if context else "") + f"Step:\n{step_text}"
-    try:
-        msg = client.chat(
-            [{"role": "system", "content": _ESTIMATE_SYSTEM},
-             {"role": "user", "content": user}],
-            profile=profile, fmt=_ESTIMATE_SCHEMA,
-        )
-        n = json.loads(msg.get("content") or "{}").get("n", 6)
-        # Запас на самокорекцію: слабка модель часто витрачає 2-3 ітерації на невдалі
-        # спроби (напр. плутає `git add -m` з `git commit -m`), тож множник і підлога
-        # вищі — інакше крок упирається в ліміт ще до завершення (як було з commit).
-        return max(10, int(n) * 3)
-    except Exception:
-        return 15
+def step_iter_limit() -> int:
+    """Запобіжник довжини кроку. Довгу справну роботу не обмежуємо — за прогресом стежить LoopGuard, а це лише
+    верхня межа. (Раніше для слабкої моделі ліміт «вгадувала» сама модель окремим викликом на кожен крок —
+    _estimate_iters; CRUTCHES.md B3.)"""
+    return limits.get().hard_iters or 30
 
 
 # Деякі моделі (помічено на qwen3-coder) під складеними інструкціями плутають тег
@@ -516,7 +491,7 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
              stop_event=None) -> tuple[str, list[str]]:
     """Виконати один крок через tool-loop (синхронна обгортка над agent.steploop — для скриптів і тестів;
     продакшн-UI викликає те саме ядро з власними хуками).
-    max_iters=None → hard_iters із налаштувань або оцінка моделлю; явне число скасовує це.
+    max_iters=None → hard_iters із налаштувань (step_iter_limit()); явне число скасовує це.
     on_tool(name, args, result) — необовʼязковий колбек для журналу.
     stats_sink — у нього додаються client.last_stats кожного виклику моделі (лічильник токенів кроку).
     stop_event: threading.Event — якщо встановлено, цикл переривається між ітераціями.
@@ -525,9 +500,7 @@ def run_step(step_text: str, ctx: ToolContext, client: OllamaClient | None = Non
     client = client or OllamaClient()
     registry = registry or default_registry()
     if max_iters is None:
-        # Слабка локальна модель: ліміт за оцінкою. Сильна (сервер): довгу роботу НЕ обмежуємо —
-        # стежимо за прогресом (LoopGuard), а hard_iters — лише запобіжник.
-        max_iters = limits.get().hard_iters or _estimate_iters(step_text, context, client)
+        max_iters = step_iter_limit()
     user = (f"Контекст:\n{context}\n\n" if context else "") + f"Крок:\n{step_text}"
     user += research_report(step_text, context, ctx, registry)      # дослідницький крок → субагент кодом
     messages = [{"role": "system", "content": SYSTEM},

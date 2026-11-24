@@ -11,7 +11,7 @@ from pathlib import Path
 from agent import executor, limits, session, tools, topics
 from agent.toolkit import ToolContext, default_registry
 
-limits.FORCE = limits.LOCAL
+limits.FORCE = limits.production()
 
 
 class Stub:

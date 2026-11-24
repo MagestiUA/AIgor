@@ -8,7 +8,8 @@ from __future__ import annotations
 import asyncio
 import time
 
-from . import activity, limits, orchestration as orch
+from . import activity, orchestration as orch
+from .agent_loop import step_iter_limit
 from .plan_runner import StepRun
 from .steploop import LoopConfig, LoopHooks, run_loop
 from .toolkit import default_registry
@@ -97,7 +98,7 @@ class HeadlessUI:
         user += await asyncio.to_thread(research_report, step_text, context, self.ctx, self.registry)
         messages = [{"role": "system", "content": SYSTEM}, {"role": "user", "content": user}]
         res = await run_loop(messages, registry=self.registry, ctx=self.ctx, client=self.client,
-                             hooks=_Hooks(self, checkpoint), cfg=LoopConfig(max_iters=limits.get().hard_iters or 30))
+                             hooks=_Hooks(self, checkpoint), cfg=LoopConfig(max_iters=step_iter_limit()))
         self.steps += 1
         touched = [p for n, a, r in res.actions if activity.result_ok(r) for p in orch.touched_paths(n, a)]
         self.echo(f"[крок] {title}: {(res.final or '')[:300]}")

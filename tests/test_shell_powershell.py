@@ -7,7 +7,7 @@ import time
 from agent import limits, tools
 from agent.toolkit import ToolContext, default_registry
 
-limits.FORCE = limits.LOCAL
+limits.FORCE = limits.production()
 
 
 def run(cmd, t=40):

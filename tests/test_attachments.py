@@ -10,8 +10,7 @@ _A.ATTACHMENTS_ROOT = Path(tempfile.mkdtemp()) / "attachments"     # реаль�
 
 from agent.attachments import (
     classify, process, session_dir, save, remove, clear, rename_session,
-    list_saved, attachments_note, CHAR_BUDGET, MAX_FILE_SIZE,
-    total_size, read_combined, INLINE_BUDGET,
+    list_saved, attachments_note, total_size, read_combined,
 )
 
 SID = "_test_session_xyz"
@@ -19,7 +18,7 @@ SID2 = "_test_session_xyz2"
 
 
 from agent import limits
-limits.FORCE = limits.LOCAL   # не залежати від налаштувань користувача
+limits.FORCE = limits.production()   # не залежати від налаштувань користувача
 
 
 def main():
@@ -36,15 +35,16 @@ def main():
     assert not r["truncated"]
 
     # process: завеликий / бінарний → error, без _content
-    assert process("big.txt", b"x" * (MAX_FILE_SIZE + 1))["error"] != ""
+    lim = limits.get()
+    assert process("big.txt", b"x" * (lim.max_file + 1))["error"] != ""
     r3 = process("img.png", b"\x89PNG\r\n\x1a\n")
     assert r3["error"] != ""
     assert "_content" not in r3
 
-    # process: обрізання до CHAR_BUDGET
-    r4 = process("long.py", ("a" * (CHAR_BUDGET + 500)).encode())
+    # process: обрізання до limits.file_chars
+    r4 = process("long.py", ("a" * (lim.file_chars + 500)).encode())
     assert r4["error"] == "" and r4["truncated"]
-    assert len(r4["_content"]) == CHAR_BUDGET
+    assert len(r4["_content"]) == lim.file_chars
 
     # ── Диск: save / list_saved / remove / clear ──
     clear(SID); clear(SID2)
@@ -98,7 +98,7 @@ def main():
         assert "=== b.txt ===\nBBBB" in combined
         assert combined.index("main.py") < combined.index("b.txt")   # порядок як у names
         assert read_combined(SID2, ["nope.txt"]) == ""   # неіснуючий файл -> пропускаємо
-        assert total_size(SID2, ["main.py", "b.txt"]) < INLINE_BUDGET
+        assert total_size(SID2, ["main.py", "b.txt"]) < limits.get().inline
         remove(SID2, "b.txt")
 
         # read_attachment: нечіткий пошук за іменем у теці вкладень

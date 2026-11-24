@@ -9,7 +9,7 @@ from agent import limits, tools
 from agent.agent_loop import ITER_LIMIT_MSG, run_step
 from agent.toolkit import ToolContext
 
-limits.FORCE = limits.LOCAL
+limits.FORCE = limits.production()
 
 
 class LoopForever:

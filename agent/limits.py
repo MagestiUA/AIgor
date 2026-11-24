@@ -27,7 +27,7 @@ class Limits:
     file_chars: int     # скільки символів файлу зберігаємо при завантаженні
     read_chars: int     # скільки символів віддає один read_file (далі — offset)
     context_tokens: int  # розмір вікна моделі (для панелі «Контекст»)
-    hard_iters: int      # запобіжник довжини кроку; 0 = оцінка моделлю (_estimate_iters), як раніше
+    hard_iters: int      # запобіжник довжини кроку (за прогресом стежить LoopGuard; 0 → 30)
     map_chars: int       # бюджет «Карти проєкту» в контексті (символи)
     # Милиці під слабку модель (CRUTCHES.md A1/A2/A4/A5): виконання «просочених» викликів
     # тулів з тексту, nudge за regex-евристиками, самовільне читання вкладень за
@@ -37,6 +37,8 @@ class Limits:
     weak_model_fixes: bool
 
 
+# Набір для СЛАБКОЇ моделі (малі бюджети + милиці weak_model_fixes) — застосунок його не використовує (get() завжди
+# повертає серверні правила під вікно моделі); лишився для тестів режиму слабкої моделі. Продакшн-набір — production().
 LOCAL = Limits(chunk=32_000, inline=32_000, summary=32_000, digest=96_000, topic=96_000,
                history_msgs=20, max_file=200 * 1024, file_chars=12_000, read_chars=8_000, context_tokens=131_072, hard_iters=0, map_chars=3500,
                weak_model_fixes=True)
@@ -60,6 +62,13 @@ def scaled(base: Limits, window: int) -> Limits:
     return replace(base, chunk=sc(base.chunk), inline=sc(base.inline), summary=sc(base.summary), digest=sc(base.digest),
                    topic=sc(base.topic), file_chars=sc(base.file_chars, 4000), read_chars=sc(base.read_chars, 4000),
                    map_chars=sc(base.map_chars, 1500), context_tokens=int(window))
+
+
+def production(window: int | None = None) -> Limits:
+    """Те, що get() дає за ТИПОВИХ налаштувань (локальна модель, вікно config.LOCAL_CTX, без милиць) — для тестів,
+    щоб вони перевіряли той самий шлях, що працює в застосунку, а не набір слабкої моделі."""
+    from . import config
+    return scaled(REMOTE, window or config.LOCAL_CTX)
 
 
 def get(settings: dict | None = None) -> Limits:

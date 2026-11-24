@@ -8,7 +8,7 @@ from pathlib import Path
 from agent import limits, projectmap as pm
 from agent.toolkit import ToolContext, default_registry
 
-limits.FORCE = limits.LOCAL
+limits.FORCE = limits.production()
 
 APP = '''"""Головний модуль сервісу."""
 import os
