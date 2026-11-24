@@ -1,153 +1,124 @@
-# local-code-agent
+# local-code-agent ("Igor")
 
 *Читати українською — [README.md](README.md).*
 
-A local coding agent built on **gemma4:26b-a4b-it-qat** (via Ollama), designed
-around a weak local model: narrow context, task decomposition, an agentic
-tool-loop, and deterministic handling of large data.
+A coding agent for **open models**, including weak ones: locally — Qwen3.8-27B via Ollama (16 GB VRAM), on a
+server — any OpenAI-compatible API (vLLM on an H100, DeepSeek, etc.). The model can work with a large project and
+large files because context is not kept "in the model's head": it is split between the planner and executors, moved
+into files, compressed without big losses, and the original can always be fetched with a tool.
 
 ## Idea
 
-- **Planner** (think=on) — reads the task and splits it into small steps.
-- **Per-step tool-loop** (think=off, narrow context) — for each step the model
-  calls tools itself via native tool-calling (read/write/edit files, run
-  commands); the runtime executes them and feeds results back until the step is
-  done. The model never runs code itself — our loop does.
-- **Strip/Restore** — large opaque literals (e.g. protobufs embedded in code) are
-  deterministically extracted into placeholders *before* the LLM and restored
-  byte-for-byte *after*. The model never sees them → can't corrupt them, and the
-  context stays small.
+- **Planner** — one structured call both decides the request type (answer / just run / clarify / plan) and splits
+  the task into narrow steps.
+- **Steps** — a separate tool-loop per step with a narrow context: the model calls tools itself, the runtime executes
+  them and feeds results back. After every step the planner sees **exact facts** (command → output, changed files)
+  collected by code, not the model's retelling, and adjusts the plan; at the end — verification (syntax +
+  consistency) and a summary.
+- **One loop** (`agent/steploop.py`) for code steps, chat, analysis and the sub-agent: the same safeguards (loop
+  detection — `LoopGuard`, read-only streaks, compaction of old results, forced conclusion).
+- **Context in files, compaction with the original's address.** Full command output goes to a file (only head and
+  tail in context), the conversation lives in the session file (`recall_history`), session notes and chat topics are
+  files (`recall`), the project map lives in the user profile. A compacted old tool result carries the exact address
+  of the original (`read_file(path, start_line=…)`, the output file path). The conversation summary is "lazy": recent
+  turns are kept verbatim, only what falls out of the window is compressed.
+- **Search instead of reading whole files**: `search` (path:line: text) + `read_file(path, start_line, limit)`.
+- **Strip/Restore** — large opaque literals (protobufs, keys) are replaced with placeholders *before* the model and
+  restored byte-for-byte *after*: the model never sees them and can't corrupt them.
+- **Research sub-agent** with a clean context: raw outputs stay inside it, the executor gets only the conclusion.
 
-## Why not Aider
-
-Aider always puts the whole file in context and regenerates it wholesale — on
-token-dense files a weak local model chokes and corrupts data. Here large data
-never passes through the model at all.
-
-## Tool registry
-
-All execution is unified under tool-calling. A tool = `{schema, handler}`; adding
-a new one = register it, no loop rewrite. Built-in tools:
+## Tools
 
 | Tool | Purpose |
 |---|---|
-| `list_dir` | project file structure |
-| `read_file` | read a file |
-| `write_file` | create / overwrite a file |
-| `edit_file` | refactor an existing `.py` (with strip/restore) |
-| `create_from_source` | create a NEW file as a copy of a source (with strip/restore) |
-| `run_shell` | run a program (python / pytest / git) |
-| `read_attachment` | read a user-attached file (fuzzy name match) |
+| `search` | find lines in files by text/regex (instead of grep in the shell) |
+| `read_file` | read a project file or an attachment (by name); large ones in line chunks |
+| `list_dir` | file structure |
+| `replace_in_file` | targeted replacement (old → new), no nested model call |
+| `edit_file` | change described in words — a separate model returns SEARCH/REPLACE (with strip/restore) |
+| `write_file` | create / overwrite a file (indentation and line-ending style preserved) |
+| `create_from_source` | a NEW file as a copy of a source (with strip/restore) |
+| `run_shell` | PowerShell in the project root; long output goes to a file |
+| `investigate` | research sub-agent (read-only) |
+| `remember` / `recall` | session notes; `recall` also reads topics of past conversations |
+| `recall_history` | search the full conversation history |
+| `project_note` | a note about a file in the "Project map" |
 | `web_search` | web search (DuckDuckGo via `ddgs`, no key) |
 
-All file-tool paths are confined to the project root (traversal protection against
-`..` or absolute paths).
+File tools are confined to the project root and added folders; service folders (command output, attachments,
+topics, notes) are read-only.
 
 ## Permissions
 
-- **edits** (`ask` / `auto`) — `ask` shows the plan and waits for approval;
-  `auto` executes immediately.
-- **shell** (`smart` / `ask` / `auto` / `allowlist` / `off`):
-  - `smart` (default) — safe commands run automatically; potentially destructive
-    ones (`rm -rf`, formatting, system dirs, etc. — see `shell_guard.py`) pause for
-    confirmation;
-  - `ask` — prompts (popup) before each command;
-  - `auto` — runs everything without asking;
-  - `allowlist` — only safe whitelisted prefixes;
-  - `off` — disables shell.
+- **edits** (`ask` / `auto`) — `ask` shows the plan and waits for approval; `auto` executes immediately (and an error
+  log is treated as "fix it").
+- **shell** (`smart` / `ask` / `auto` / `allowlist` / `off`): `smart` (default) — safe commands run, potentially
+  destructive ones (see `shell_guard.py`) wait for confirmation.
 
 ## Layout
 
 ```
 agent/
-  config.py      EXECUTOR / PLANNER profiles
-  llm.py         Ollama client (tool-calling, think toggle)
-  literals.py    strip / restore of large literals
-  tools.py       deterministic file/shell primitives + allow-list
-  executor.py    run_edit / create_from_source (strip→LLM→restore→diff)
-  toolkit.py     tool registry + ToolContext (root, permissions, confirm)
-  agent_loop.py  per-step tool-loop (run_step)
-  planner.py     task decomposition into steps
-  intent.py      intent classification (edit / plan / answer / shell)
-  answerer.py    code Q&A / analysis (think=on)
-  memory.py      task state on disk
-  session.py     sessions/chats (project, permissions, history, sources)
-  project.py     AGENT.md (project knowledge) + structure scan
-  convo.py       conversation context-memory (compact summary across turns)
-  attachments.py attachments on disk + read_attachment
-  shell_guard.py classifier of dangerous shell commands (smart mode)
-  websearch.py   web search (DuckDuckGo, pluggable provider)
-  settings.py    settings (theme, font sizes) on disk
-lca_web/
-  lca_web.py     web UI (Reflex, Claude-style); Chat | Code modes
-main.py          entry point (convenient from PyCharm)
-rxconfig.py      Reflex config
+  steploop.py     the single "model → tools" loop core (hooks for UI / headless / sub-agent)
+  agent_loop.py   executor prompt, step-history compaction, safeguards, run_step (headless)
+  plan_runner.py  plan execution: steps, planner review, verification, summary (PlanUI — environment interface)
+  headless.py     the agent without UI (HeadlessUI, CountingClient) — for task runs
+  planner.py      decision: answer / shell / clarify / choose / plan; steps act / note
+  intent.py       unambiguous routing without the model
+  stepreview.py   step facts report, plan review, verification, execution summary
+  toolkit.py      tool registry + ToolContext
+  search.py       the search tool
+  executor.py     edit_file / create_from_source (strip → model → restore → diff)
+  patching.py     SEARCH/REPLACE with fuzzy matching and indentation alignment
+  literals.py     strip / restore of large literals
+  loopguard.py    loop detector
+  convo.py        conversation summary (lazy), verbatim tail, digest of large attachments
+  history.py      recall_history
+  sessionmem.py   session notes;  topics.py — chat topics (shared between chats)
+  projectmap.py   "Project map" (AST skeletons, ✓/⚠ marks)
+  spill.py        large tool output → file
+  limits.py       budgets scaled to the model window
+  llm.py / llm_openai.py / backend.py   Ollama / OpenAI-compatible clients, backend choice
+  session.py, attachments.py, settings.py, servers.py, logs.py, updater.py …
+lca_web/          Reflex UI (state.py — state and adapters to the core, ui.py — layout)
+scripts/          release.py (build & release), run_task.py (headless task runs with metrics)
 ```
 
-## Reliability under a weak model
+## Weak-model mode
 
-A few techniques keep the weak local model inside the working loop:
-
-- **DRY sampling** in the `EXECUTOR` profile — penalizes repeating whole
-  phrases/sequences (e.g. the same failing command over and over) without
-  damaging code the way a blunt `repeat_penalty` would.
-- **Tool-call nudge** — if the model narrates an intent instead of calling a tool,
-  the loop nudges it once to perform the step as an action.
-- **Plan context per step** — the step executor sees the overall task and sibling
-  steps, not just its bare step description.
-- **Strip/Restore** of large literals (see above) + `think=off` for structured
-  output (JSON plans don't get truncated by thinking).
-
-## Project knowledge (AGENT.md)
-
-The working project root may contain an `AGENT.md` — curated knowledge injected
-into the planner/executor on every task (not RAG/embeddings — for a small project
-and a weak model a single curated file works better). An optional init-scan
-auto-drafts `AGENT.md` for a new repo.
+For other weak local models the settings have `weak_model_fixes`: executing tool calls "leaked" into text, nudges,
+gathering without thinking + a separate synthesis. Off for Qwen3.8 and the server — it hurts there (see `CRUTCHES.md`).
 
 ## Requirements
 
 - Python 3.12, `requests`, `reflex==0.9.5.post2`, `ddgs` (web search)
-- Ollama with the `gemma4:26b-a4b-it-qat` model
+- Ollama with `hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL` (local) or an OpenAI-compatible server
 
 ## Ollama: q4_0 KV-cache + flash attention
 
-Per our benchmark (gemma4 / qwen3-coder, context 65536→131072→262144), `q4_0`
-KV-cache + flash attention give an almost-free context doubling (gemma4
-113.5→108.5 t/s, -4%) and noticeably lower VRAM (KV buffer drops ~3.5x: 12288 MiB
-→ 3456 MiB at 131072). So `agent/llm.py` `_ensure_server` starts `ollama serve` with
-`OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q4_0` in its env — for ANY
-model, no per-model tweaking needed.
+`agent/llm.py` `_ensure_server` starts `ollama serve` with `OLLAMA_FLASH_ATTENTION=1` and `OLLAMA_KV_CACHE_TYPE=q4_0`
+in its env — an almost-free context doubling and lower VRAM, for any model.
 
-**Windows gotcha**: the desktop tray app `ollama app.exe` has its own supervisor
-that restarts the server with its own (stale) env block — a User env var change via
-`setx`/System Properties doesn't reach an already-running supervisor without a full
-logoff/reboot. If the tray app wins the race and starts first, our env is simply
-ignored.
-
-So: `ollama app.exe` autostart is disabled (the `...\Startup\Ollama.lnk` shortcut was
-moved to `%USERPROFILE%\Ollama_autostart_disabled.lnk`) — only our own code
-(`_ensure_server`, explicit `env=` on `subprocess.Popen`, independent of the system
-registry) starts the server now. The first `python main.py` run after a reboot
-starts Ollama itself; there's no tray icon anymore.
+**Windows gotcha**: the tray app `ollama app.exe` has its own supervisor that restarts the server with its own
+(stale) env block. So the `ollama app.exe` autostart is disabled — only our code starts the server (explicit `env=`
+on `Popen`).
 
 ## Running
 
 ```powershell
-# web UI (frontend :3000, backend :8000)
-.\run_web.ps1
-# or
 python main.py
 ```
 
-From PyCharm: open `main.py` → ▶ Run (interpreter = the project `.venv`).
+Run a task without the UI through the same path as the app (on a copy of the project), with metrics:
+
+```powershell
+.venv\Scripts\python.exe scripts\run_task.py --root D:\copy-of-project "add function X to a.py"
+```
 
 ## Tests
 
-All tests are offline (stub clients, no GPU):
+All tests are offline (stub models, no GPU), on the same limits as the app:
 
 ```powershell
-.venv\Scripts\python.exe -m tests.test_toolkit
-.venv\Scripts\python.exe -m tests.test_agent_loop
-# ... and others under tests/
+$env:PYTHONIOENCODING="utf-8"; .venv\Scripts\python.exe tests\run_all.py -j 4
 ```

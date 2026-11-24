@@ -2373,6 +2373,7 @@ class State(rx.State):
             self.status = "Обмірковую відповідь…"
             root = self.project_root
             plan_first = self.plan_first or self.edits == "ask"
+            logs.session_var.set(self.current_id or "-")
         client = await asyncio.to_thread(get_client)
         task, outcome = value, ""
         try:
@@ -2497,6 +2498,7 @@ class State(rx.State):
             plan = s0.get_pending_plan()
             s0.clear_pending_plan()
             sess.save_session(s0)
+        logs.session_var.set(cid or "-")                   # id чату в рядках лога виконання плану (раніше тут був «-»)
 
         client = await asyncio.to_thread(get_client)
         outcome = ""
