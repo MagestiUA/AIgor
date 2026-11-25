@@ -247,13 +247,34 @@ STREAM_FLUSH_S = 0.2                       # як часто (с) оновлюв
 SHOWN_STEP = 40                            # порція повідомлень історії, що рендериться (і підвантажується кнопкою)
 INPUT_ID = "task-input"                   # поле вводу повідомлення (некероване)
 CLEAR_INPUT_JS = (f"(function(){{var e=document.getElementById('{INPUT_ID}');"
-                  "if(e){e.value='';e.style.height='';}})()")
+                  "if(e){e.value='';e.style.height='';e.style.overflowY='';}})()")
+
+# Поле вводу росте разом із текстом: від 2 рядків до INPUT_MAX_VH % висоти вікна (понад 3× від початкової), далі — скрол
+# усередині. Один document-listener на сторінку (переживає перестворення поля при перемиканні макета); відправка
+# скидає висоту (CLEAR_INPUT_JS). Поле некероване, тож рахуємо висоту з scrollHeight на кожну подію input.
+INPUT_MAX_VH = 40
+INPUT_GROW_JS = """
+(function(){
+  if (window.__igorGrow) return;
+  window.__igorGrow = true;
+  function grow(e){
+    if (!e || e.id !== '__ID__') return;
+    var max = Math.max(120, Math.round(window.innerHeight * __VH__ / 100));
+    e.style.height = 'auto';
+    var h = e.scrollHeight;
+    e.style.height = Math.min(h, max) + 'px';
+    e.style.overflowY = h > max ? 'auto' : 'hidden';
+  }
+  document.addEventListener('input', function(ev){ grow(ev.target); }, true);
+  window.addEventListener('resize', function(){ grow(document.getElementById('__ID__')); });
+})()
+""".replace("__ID__", INPUT_ID).replace("__VH__", str(INPUT_MAX_VH))
 
 
 def restore_input_js(text: str) -> str:
     """JS: дочекатись (до ~2 с), поки поле вводу з'явиться після перемикання макета, і вернути в нього текст."""
     return (f"(function f(t,n){{var e=document.getElementById('{INPUT_ID}');"
-            "if(e&&!e.value){e.value=t;e.focus();return;}"
+            "if(e&&!e.value){e.value=t;e.dispatchEvent(new Event('input',{bubbles:true}));e.focus();return;}"
             "if(n<20)setTimeout(function(){f(t,n+1)},100);}})("
             f"{json.dumps(text)},0)")
 
@@ -1114,8 +1135,8 @@ class State(rx.State):
         # PASTE_SETUP_JS — одноразово вішає document-listener вставки файлів (Ctrl+V).
         # poll_gpu стартуємо ТУТ, а не окремо в on_load: фонова подія читає gpu_enabled, виставлений вище, а при
         # паралельному старті могла прочитати ще старе значення й одразу вийти.
-        return [rx.call_script(self.ui_font_js), rx.call_script(PASTE_SETUP_JS), rx.call_script(AGO_JS),
-                rx.call_script(GPU_JS), State.poll_gpu]
+        return [rx.call_script(self.ui_font_js), rx.call_script(PASTE_SETUP_JS), rx.call_script(INPUT_GROW_JS),
+                rx.call_script(AGO_JS), rx.call_script(GPU_JS), State.poll_gpu]
 
     def _persist_settings(self):
         from agent import settings as S
