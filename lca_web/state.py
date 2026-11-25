@@ -2238,7 +2238,10 @@ class State(rx.State):
                 self._append("assistant", "📝 Коментар прийнято — планувальник врахує його після поточного кроку "
                                           "(виконавець побачить раніше).", "note")
                 return
-            if self.busy or self.has_pending or self.has_question:                              # модель зайнята або чекає на дію користувача -> у чергу
+            # Модель зайнята або чекає «Виконати/Відхилити» -> у чергу. Питання планувальника (has_question) НЕ блокує:
+            # текст у полі — це відповідь на нього (_process_one_inner: answering → _resume_planning). Раніше такий
+            # текст відкладався в чергу й ніхто не реагував, поки не натиснеш «Скасувати».
+            if self.busy or self.has_pending:
                 self.queued_text = (self.queued_text + "\n\n" + text).strip() if self.queued_text else text
                 return
             self.busy = True
@@ -2439,14 +2442,19 @@ class State(rx.State):
         action = result["action"]
 
         if action in ("clarify", "choose"):
+            question, reasoning = (result.get("question") or "").strip(), (result.get("reasoning") or "").strip()
+            if not question:
+                # Модель обрала уточнення, але питання не сформулювала (лише пояснення). Раніше виходило «****» —
+                # у markdown це горизонтальна лінія — без жодного питання. Пояснення і є питання; нічого не вигадуємо.
+                question, reasoning = reasoning or "Потрібне уточнення — напишіть відповідь у полі нижче.", ""
             q = {"task": task, "context": context, "doc": doc, "history": history,
-                 "question": result["question"], "reasoning": result["reasoning"],
+                 "question": question, "reasoning": reasoning,
                  "options": result["options"]}
             async with self:
-                head = (result["reasoning"] + "\n\n") if result["reasoning"] else ""
-                self._append("assistant", f"{head}**{result['question']}**", "plan")
-                self.q_text = result["question"]
-                self.q_reasoning = result["reasoning"]
+                head = (reasoning + "\n\n") if reasoning else ""
+                self._append("assistant", f"{head}**{question}**", "plan")
+                self.q_text = question
+                self.q_reasoning = reasoning
                 self.q_options = result["options"]
                 self.has_question = True
                 s = sess.load_session(self.current_id)
