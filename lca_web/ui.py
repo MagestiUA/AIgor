@@ -758,6 +758,16 @@ def token_bar() -> rx.Component:
     return rx.hstack(left, class_name="items-center w-full px-1 mb-1")
 
 
+def brand() -> rx.Component:
+    """Назва «AIgor» з виділеним «AI»: у звичайному шрифті велика I не відрізняється від l і назва читається як «Algor».
+    Моноширинний шрифт дає I із засічками, а акцентний колір відділяє «AI» від «gor»."""
+    return rx.fragment(
+        rx.el.span("AI", style={"color": "#4f8cff", "fontFamily": "Consolas, 'JetBrains Mono', 'Courier New', monospace",
+                                "fontWeight": "700", "letterSpacing": "0.02em"}),
+        rx.el.span("gor"),
+    )
+
+
 def input_box() -> rx.Component:
     return rx.form(
         rx.vstack(
@@ -1147,7 +1157,7 @@ def context_panel() -> rx.Component:
     )
     return rx.box(
         rx.vstack(
-            rx.heading("AIgor", size="3", class_name="mb-1"),
+            rx.heading(brand(), size="3", class_name="mb-1"),
             gpu_card(),
             _section("Середовище", rx.foreach(State.env_rows, _kv)),
             _section("Контекст", context),
