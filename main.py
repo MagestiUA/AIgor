@@ -226,7 +226,7 @@ def _open_window(url: str, log) -> None:
     # тексту в усьому вікні (живий кейс: текст у чаті неможливо було виділити).
     from agent import logs as _logs
     window = webview.create_window(
-        f"Ігорь! · {_logs.app_version()}", url, width=geo["width"], height=geo["height"],
+        f"AIgor · {_logs.app_version()}", url, width=geo["width"], height=geo["height"],
         x=geo.get("x"), y=geo.get("y"), min_size=MIN_WINDOW, text_select=True,
     )
     # closing — синхронна подія (блокує закриття до завершення хендлера),
@@ -303,7 +303,7 @@ def _show_error(text: str) -> None:
     """Повідомлення користувачеві, коли консолі немає (.exe без консолі)."""
     try:
         import ctypes
-        ctypes.windll.user32.MessageBoxW(0, text, "Ігорь!", 0x10)
+        ctypes.windll.user32.MessageBoxW(0, text, "AIgor", 0x10)
     except Exception:
         print(text)
 

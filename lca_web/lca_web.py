@@ -28,5 +28,5 @@ app = rx.App(
     stylesheets=["https://fonts.googleapis.com/css2?family=Newsreader:ital@0;1&display=swap"],
     head_components=[rx.el.style("html,body{margin:0;height:100%;overflow:hidden}")],
 )
-app.add_page(index, title=f"Ігорь! · {logs.app_version()}",
+app.add_page(index, title=f"AIgor · {logs.app_version()}",
              on_load=[State.load_sessions, State.load_settings, State.check_updates(True), State.poll_updates])

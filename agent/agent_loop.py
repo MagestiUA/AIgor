@@ -310,7 +310,7 @@ SYSTEM = (
 def step_iter_limit() -> int:
     """Запобіжник довжини кроку. Довгу справну роботу не обмежуємо — за прогресом стежить LoopGuard, а це лише
     верхня межа. (Раніше для слабкої моделі ліміт «вгадувала» сама модель окремим викликом на кожен крок —
-    _estimate_iters; CRUTCHES.md B3.)"""
+    _estimate_iters; docs/uk/CRUTCHES.md B3.)"""
     return limits.get().hard_iters or 30
 
 
@@ -396,7 +396,7 @@ def recover_tool_calls(msg: dict) -> tuple[list[dict], bool]:
     if calls:
         return calls, False
     if not limits.get().weak_model_fixes:
-        return [], False   # сильна модель: текст лишається текстом (див. CRUTCHES.md A1)
+        return [], False   # сильна модель: текст лишається текстом (див. docs/uk/CRUTCHES.md A1)
     leaked = _extract_leaked_tool_call((msg.get("content") or "").strip())
     return ([leaked], True) if leaked else ([], False)
 

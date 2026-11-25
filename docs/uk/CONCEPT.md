@@ -1,4 +1,4 @@
-# Концепція local-code-agent
+# Концепція AIgor (колишній local-code-agent)
 
 **Початкова ідея.** Локальний агент у стилі Claude Code, заточений на *відносно слабку
 локальну модель* (gemma4 / Qwen3-Coder через Ollama, 16 GB VRAM). Базова модель сама

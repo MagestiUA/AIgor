@@ -304,7 +304,7 @@ def gpu_settings_section() -> rx.Component:
             rx.switch(checked=State.gpu_enabled, on_change=State.set_gpu_monitor, size="2"),
             rx.text("Відображати навантаження ГПУ", class_name="text-sm text-gray-300"),
             class_name="items-center gap-3"),
-        rx.text("Якщо на сервері піднято сумісний агент моніторингу навантаження: раз на 10 с Ігорь читає "
+        rx.text("Якщо на сервері піднято сумісний агент моніторингу навантаження: раз на 10 с AIgor читає "
                 "GET /metrics.json (той самий ключ, що й для моделі) і показує зверху правої панелі, чи "
                 "відповідає сервер та навантаження ГПУ (завантаження, Вт, температура, VRAM). Адреса сервера — "
                 "з підключення до LLM; працює лише з бекендом «Сервер (OpenAI API)». Увімкнено за замовчуванням; "
@@ -949,7 +949,7 @@ def activity_panel() -> rx.Component:
             rx.el.summary(
                 rx.hstack(
                     rx.icon("activity", size=14),
-                    rx.text("Що робить Ігорь · подій: ", State.activity.length(), " · остання ",
+                    rx.text("Що робить AIgor · подій: ", State.activity.length(), " · остання ",
                             rx.el.span(data_ts=State.activity_last, class_name="igor-ago"),
                             class_name="text-xs"),
                     rx.cond(State.busy, rx.spinner(size="1")),
@@ -1128,7 +1128,7 @@ def context_panel() -> rx.Component:
         rx.cond(State.tok_out > 0,
                 rx.text("Останній запит: ", State.tokens_label, class_name="text-xs text-gray-500 font-mono")),
         rx.text("Токени — оцінка за символами. Підсумок розмови, дайджести файлів і нотатки тем "
-                "стискаються автоматично при перевищенні порогу; про кожне стиснення Ігорь пише "
+                "стискаються автоматично при перевищенні порогу; про кожне стиснення AIgor пише "
                 "в чаті й у лозі.", class_name="text-xs text-gray-600"),
         gap="3", class_name="w-full")
     changes = rx.cond(
@@ -1147,7 +1147,7 @@ def context_panel() -> rx.Component:
     )
     return rx.box(
         rx.vstack(
-            rx.heading("Ігорь", size="3", class_name="mb-1"),
+            rx.heading("AIgor", size="3", class_name="mb-1"),
             gpu_card(),
             _section("Середовище", rx.foreach(State.env_rows, _kv)),
             _section("Контекст", context),

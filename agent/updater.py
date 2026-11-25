@@ -21,7 +21,7 @@ from typing import Callable
 
 import requests
 
-REPO = "MagestiUA/local-code-agent"
+REPO = "MagestiUA/AIgor"            # перейменовано з local-code-agent (GitHub перенаправляє стару адресу)
 API_URL = f"https://api.github.com/repos/{REPO}/releases/latest"
 ASSET_EXE = "Igor.exe"
 ASSET_SHA = "Igor.exe.sha256"

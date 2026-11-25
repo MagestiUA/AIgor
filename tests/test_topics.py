@@ -36,15 +36,15 @@ def main() -> None:
 
         # нова тема
         t1 = topics.classify_topic(
-            "що з фронтом біля Костянтинівки", "обговорили оточення",
-            [], client=Stub(['{"topic": "Костянтинівка", "is_new": true}']),
+            "як спланувати похід у Карпати", "обговорили маршрут",
+            [], client=Stub(['{"topic": "Карпати", "is_new": true}']),
         )
-        assert t1 == "Костянтинівка"
-        note1 = topics.update_topic_note("", "що з фронтом", "оточення міста",
-                                         client=Stub(["Місто в оточенні."]))
+        assert t1 == "Карпати"
+        note1 = topics.update_topic_note("", "який маршрут", "маршрут через Говерлу",
+                                         client=Stub(["Маршрут через Говерлу."]))
         topics.save_topic(t1, note1)
-        assert topics.list_topics() == ["Костянтинівка"]
-        assert topics.load_topic(t1) == "Місто в оточенні."
+        assert topics.list_topics() == ["Карпати"]
+        assert topics.load_topic(t1) == "Маршрут через Говерлу."
 
         # модель ЛУНАЄ заголовок промпту замість чистого тексту (живий кейс) -> обрізаємо
         note_echo = topics.update_topic_note("", "хід", "відповідь",
@@ -66,24 +66,24 @@ def main() -> None:
 
         # той самий хід належить до ІСНУЮЧОЇ теми
         t2 = topics.classify_topic(
-            "а що по 156 бригаді", "слабка ланка", ["Костянтинівка"],
-            client=Stub(['{"topic": "Костянтинівка", "is_new": false}']),
+            "а що зі спорядженням", "трекінгові палиці", ["Карпати"],
+            client=Stub(['{"topic": "Карпати", "is_new": false}']),
         )
-        assert t2 == "Костянтинівка"
-        note2 = topics.update_topic_note(note1, "156 бригада", "слабка ланка",
-                                         client=Stub(["Місто в оточенні; 156 бригада — слабка ланка."]))
+        assert t2 == "Карпати"
+        note2 = topics.update_topic_note(note1, "спорядження", "трекінгові палиці",
+                                         client=Stub(["Маршрут через Говерлу; спорядження — трекінгові палиці."]))
         topics.save_topic(t2, note2)
-        assert "156 бригада" in topics.load_topic(t2)
+        assert "спорядження" in topics.load_topic(t2)
 
         # нова, ІНША тема
         t3 = topics.classify_topic(
-            "що по нафті РФ", "ціна може впасти", ["Костянтинівка"],
-            client=Stub(['{"topic": "Економіка РФ", "is_new": true}']),
+            "що з цінами на житло", "ціни можуть впасти", ["Карпати"],
+            client=Stub(['{"topic": "Ціни на житло", "is_new": true}']),
         )
-        assert t3 == "Економіка РФ"
-        topics.save_topic(t3, topics.update_topic_note("", "нафта", "ціна впаде",
-                                                        client=Stub(["Ціна нафти може впасти."])))
-        assert set(topics.list_topics()) == {"Костянтинівка", "Економіка РФ"}
+        assert t3 == "Ціни на житло"
+        topics.save_topic(t3, topics.update_topic_note("", "житло", "ціни впадуть",
+                                                        client=Stub(["Ціни на житло можуть впасти."])))
+        assert set(topics.list_topics()) == {"Карпати", "Ціни на житло"}
 
         # переповнення бюджету -> другий (стискаючий) прохід
         compressed = topics.update_topic_note("x" * 200, "ще щось", "ще щось",
@@ -96,7 +96,7 @@ def main() -> None:
 
         # available_topics_note
         assert topics.available_topics_note([]) == ""
-        assert "Костянтинівка" in topics.available_topics_note(["Костянтинівка", "Економіка РФ"])
+        assert "Карпати" in topics.available_topics_note(["Карпати", "Ціни на житло"])
 
         # traversal-захист у назві теми (слаг)
         topics.save_topic("../../escape", "x")
@@ -106,9 +106,9 @@ def main() -> None:
         from agent.toolkit import ToolContext, default_registry
         reg = default_registry()
         ctx = ToolContext(root=Path(tempfile.mkdtemp()))
-        got = reg.dispatch("recall", {"name": "костянтинівка"}, ctx)
-        assert got.startswith("=== тема: Костянтинівка ===") and "156 бригада" in got, got[:200]
-        assert "156 бригада" in reg.dispatch("read_topic", {"name": "Костянтин"}, ctx)       # стара назва працює
+        got = reg.dispatch("recall", {"name": "карпати"}, ctx)
+        assert got.startswith("=== тема: Карпати ===") and "спорядження" in got, got[:200]
+        assert "спорядження" in reg.dispatch("read_topic", {"name": "Карпат"}, ctx)       # стара назва працює
         assert "read_topic" not in reg.names() and "теми:" in reg.dispatch("recall", {"name": "нема-такої"}, ctx)
         topics.save_topic("Велика", "".join(f"рядок {i}\n" for i in range(40_000)))
         big = reg.dispatch("recall", {"name": "Велика"}, ctx)

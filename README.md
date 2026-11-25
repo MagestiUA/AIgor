@@ -1,122 +1,121 @@
-# local-code-agent («Ігорь»)
+# AIgor
 
-*Read this in [English](README.en.md).*
+*Українською — [README.uk.md](README.uk.md).*
 
-Кодинг-агент для **відкритих моделей**, зокрема слабких: локально — Qwen3.8-27B через Ollama (16 ГБ VRAM), на
-сервері — будь-який OpenAI-сумісний API (vLLM на H100, DeepSeek тощо). Модель може працювати з великим проєктом і
-великими файлами, бо контекст не тримається «в голові» моделі: він розділений між планувальником і виконавцями,
-винесений у файли, стискається без великих втрат, а оригінал завжди можна дістати тулом.
+**A desktop coding agent built for weak and mid-size open LLMs.** It runs on a 27B model quantized to fit a 16 GB
+consumer GPU (Qwen3.8-27B via Ollama) or on any OpenAI-compatible server (vLLM, DeepSeek, …), and still works on
+real projects with large files. It doesn't rely on the model keeping everything in its window. The planner splits
+work into narrow steps, context lives in files, compression always leaves a pointer back to the original, and the
+model searches instead of reading whole files.
 
-## Ідея
+![AIgor running a multi-step coding task on a local model](docs/img/screenshot-code.png)
 
-- **Планувальник** — один структурований виклик і визначає тип запиту (відповісти / просто запустити / уточнити /
-  план), і ріже задачу на вузькі кроки.
-- **Кроки** — окремий tool-loop на кожен крок із вузьким контекстом: модель сама викликає інструменти, рантайм їх
-  виконує й повертає результат. Планувальник після кожного кроку бачить **точні факти** (команда → вивід, змінені
-  файли), зібрані кодом, а не переказ моделі, і коригує план; наприкінці — звірка (синтаксис + узгодженість) і підсумок.
-- **Один цикл** (`agent/steploop.py`) для кроків коду, чату, аналізу й субагента: ті самі запобіжники (зациклення —
-  `LoopGuard`, читання без дій, стиснення старих результатів, примусовий висновок).
-- **Контекст у файлах, стиснення з адресою оригіналу.** Повні виводи команд — у файл (у контекст лише голова й хвіст),
-  розмова — у файлі сесії (`recall_history`), нотатки сесії й теми чату — файли (`recall`), карта проєкту — у профілі.
-  Стиснутий старий результат тулу несе точну адресу оригіналу (`read_file(path, start_line=…)`, шлях до виводу).
-  Підсумок розмови «лінивий»: свіжі репліки — дослівно, стискається лише те, що випадає з вікна.
-- **Пошук замість читання цілком**: `search` (шлях:рядок: текст) + `read_file(path, start_line, limit)`.
-- **Strip/Restore** — великі опакові літерали (протобафи, ключі) вирізаються в плейсхолдери *до* моделі й
-  повертаються байт-у-байт *після*: модель їх не бачить і не псує.
-- **Субагент-дослідник** з чистим контекстом: сирі виводи лишаються в ньому, виконавцю — лише висновок.
+*A 5-step plan executed by Qwen3.8-27B on a local GPU: each step reports exact facts, the planner reviews them,
+then a syntax + consistency check and a final summary.*
 
-## Інструменти
+> **Status:** an actively developed personal project, Windows-first. **The UI is in Ukrainian for now**; the code,
+> prompts and this documentation are usable in English. Issues and PRs are welcome.
 
-| Інструмент | Призначення |
-|---|---|
-| `search` | знайти рядки у файлах за текстом/регулярним виразом (замість grep у консолі) |
-| `read_file` | прочитати файл проєкту або вкладення (за іменем); великі — частинами за рядками |
-| `list_dir` | структура файлів |
-| `replace_in_file` | точкова заміна фрагмента (old → new), без вкладеного виклику моделі |
-| `edit_file` | зміна словами — окрема модель повертає SEARCH/REPLACE (зі strip/restore) |
-| `write_file` | створити / перезаписати файл (стиль відступів і закінчень рядків зберігається) |
-| `create_from_source` | НОВИЙ файл як копія джерела (зі strip/restore) |
-| `run_shell` | PowerShell у корені проєкту; довгий вивід — у файл |
-| `investigate` | субагент-дослідник (лише читання) |
-| `remember` / `recall` | нотатки сесії; `recall` читає й теми минулих розмов |
-| `recall_history` | пошук у повній історії розмови |
-| `project_note` | нотатка про файл у «Карті проєкту» |
-| `web_search` | пошук у вебі (DuckDuckGo через `ddgs`, без ключа) |
+## Why
 
-Файлові тули обмежені коренем проєкту й доданими теками; службові теки (виводи команд, вкладення, теми, нотатки) —
-лише для читання.
+Strong hosted models can hold a whole repository in their head. Open models you can run yourself usually can't:
+they lose track in long tool loops, retype data they shouldn't touch, and overflow their context. AIgor is built
+around those limits instead of hoping they go away:
 
-## Дозволи
+- **Planner → narrow steps.** One structured call decides what the request is (answer / just run / clarify /
+  plan) and splits the task into a few coarse steps. Each step runs in its own short tool loop with a narrow context.
+- **Facts, not retellings.** After each step the planner sees exactly which commands ran with their output and which
+  files changed, collected by code rather than the model's summary, and it can revise the plan. At the end it runs
+  a syntax + consistency check and writes a summary of what was actually done.
+- **Search first.** `search` returns `path:line: text`; `read_file(path, start_line, limit)` reads only the
+  needed lines. Small edits use `replace_in_file` (old → new, no second model pass over the file).
+- **Context in files, compression with an address.** Long command output goes to a file, and the context gets the
+  head, tail and file path. Old tool results are compacted to a short head plus the exact call that brings the
+  original back. Conversation history stays on disk (`recall_history`); notes and topics are files (`recall`). The
+  conversation summary is lazy: recent turns stay verbatim, and only what falls out of the window gets summarized.
+- **Large opaque literals never pass through the model.** Protobuf blobs, keys and base64 are cut out into
+  placeholders before the model sees the file and restored byte-for-byte afterwards.
+- **One loop, many safeguards.** Code steps, chat, analysis and the research sub-agent share one loop core with loop
+  detection (`LoopGuard`), a "reading without acting" limit, a forced conclusion, and compaction before the window
+  overflows.
+- **Cache-friendly prompts.** Stable context comes first, and the changing plan goes last. On vLLM this cuts prefill
+  time on steps 2+ by about 36–43% (measured: `scripts/bench_context_order.py`).
 
-- **правки** (`ask` / `auto`) — `ask` показує план і чекає підтвердження; `auto` виконує одразу (і лог помилки
-  сприймається як «виправ»).
-- **консоль** (`smart` / `ask` / `auto` / `allowlist` / `off`): `smart` (типово) — безпечні команди виконуються,
-  потенційно руйнівні (див. `shell_guard.py`) чекають підтвердження.
+More detail: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-## Структура
+## Features
 
-```
-agent/
-  steploop.py     єдине ядро циклу «модель → інструменти» (хуки для UI / без UI / субагента)
-  agent_loop.py   промпт виконавця, стиснення історії кроку, запобіжники, run_step (без UI)
-  plan_runner.py  виконання плану: кроки, перегляд планувальником, звірка, підсумок (PlanUI — інтерфейс середовища)
-  headless.py     агент без UI (HeadlessUI, CountingClient) — для прогонів задач
-  planner.py      рішення: answer / shell / clarify / choose / plan; кроки act / note
-  intent.py       однозначна маршрутизація без моделі
-  stepreview.py   звіт фактів кроку, перегляд плану, звірка, підсумок виконання
-  toolkit.py      реєстр інструментів + ToolContext
-  search.py       тул пошуку
-  executor.py     edit_file / create_from_source (strip → модель → restore → diff)
-  patching.py     SEARCH/REPLACE із нечітким збігом і вирівнюванням відступів
-  literals.py     strip / restore великих літералів
-  loopguard.py    детектор зациклення
-  convo.py        підсумок розмови (лінивий), дослівний хвіст, дайджест великих вкладень
-  history.py      recall_history
-  sessionmem.py   нотатки сесії;  topics.py — теми чату (спільні між чатами)
-  projectmap.py   «Карта проєкту» (AST-скелети, позначки ✓/⚠)
-  spill.py        великі виводи тулів — у файл
-  limits.py       бюджети під вікно моделі
-  llm.py / llm_openai.py / backend.py   клієнти Ollama / OpenAI-сумісний, вибір бекенда
-  session.py, attachments.py, settings.py, servers.py, logs.py, updater.py …
-lca_web/          Reflex-інтерфейс (state.py — стан і адаптери до ядра, ui.py — розмітка)
-scripts/          release.py (збірка й реліз), run_task.py (прогін задач без UI з метриками)
-```
+- **Code mode:** plan → steps → verification, with edits shown as diffs. Editing permission is `ask` or `auto`;
+  shell permission is `smart` (dangerous commands need confirmation), `ask`, `auto`, `allowlist` or `off`.
+  You can comment while a plan is running: the executor sees your comment between actions, and the planner sees it
+  after the step. A failed step pauses the plan, and "Run" resumes from that step.
+- **Chat mode:** a thinking model with web search and read tools; topics persist across chats.
+- **Attachments and images:** files are stored on disk and read by name. Small ones are inlined; large ones are read
+  in chunks with a digest.
+- **Context panel:** shows what occupies the model window, plus project folders and git changes.
+- **Backends:** local Ollama (one model for all roles, window size from settings) or any OpenAI-compatible server,
+  with saved server profiles. "Strict" mode supports servers without vLLM extensions, such as DeepSeek.
+- **Self-update** from GitHub Releases (SHA-256 checked), **diagnostics export**, and logs without your prompts or
+  keys.
 
-## Режим слабкої моделі
+## Quick start (Windows)
 
-Для інших слабких локальних моделей у налаштуваннях є `weak_model_fixes`: виконання «просочених» у текст викликів
-тулів, підштовхування, збір без роздумів + окремий синтез. Для Qwen3.8 і сервера вимкнено — там вони шкодять
-(див. `CRUTCHES.md`).
+1. Download `Igor.exe` from [Releases](https://github.com/MagestiUA/AIgor/releases/latest). It is a single file,
+   with nothing else to install. SmartScreen may ask: *More info → Run anyway*.
+2. **Settings** (gear, bottom-left) → *LLM connection*:
+   - **Local:** install [Ollama](https://ollama.com), pull a model (default
+     `hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL`, about 15 GB, fits 16 GB VRAM at a 64k window), pick *Local*.
+   - **Server:** enter host, port, API key, then *Check* → *Save*.
+3. **Code** mode → choose the project folder → describe the task.
 
-## Вимоги
+Commit your work before you start: AIgor edits files in the chosen folder. Your data (chats, settings) lives in
+`%USERPROFILE%\.local-code-agent\`.
 
-- Python 3.12, `requests`, `reflex==0.9.5.post2`, `ddgs` (веб-пошук)
-- Ollama з моделлю `hf.co/unsloth/Qwen3.8-27B-GGUF:UD-Q3_K_XL` (локально) або OpenAI-сумісний сервер
-
-## Ollama: q4_0 KV-cache + flash attention
-
-`agent/llm.py` `_ensure_server` піднімає `ollama serve` з `OLLAMA_FLASH_ATTENTION=1` і `OLLAMA_KV_CACHE_TYPE=q4_0`
-у env — майже безкоштовне подвоєння контексту й менший VRAM, для будь-якої моделі.
-
-**Пастка на Windows**: трей `ollama app.exe` має власний наглядач, який перезапускає сервер зі своїм (старим)
-env-блоком. Тому автостарт `ollama app.exe` вимкнено — сервер піднімає лише наш код (явний `env=` у `Popen`).
-
-## Запуск
+## Run from source
 
 ```powershell
-python main.py
+py -3.12 -m venv .venv
+.venv\Scripts\pip install -r requirements.txt
+.venv\Scripts\python main.py          # desktop window (pywebview)
 ```
 
-Прогін задачі без UI тим самим шляхом, що в застосунку (на копії проєкту), з метриками:
+Run a task without the UI through the same code path as the app, with metrics (use a copy of the project):
 
 ```powershell
-.venv\Scripts\python.exe scripts\run_task.py --root D:\copy-of-project "додай функцію X у a.py"
+.venv\Scripts\python scripts\run_task.py --root D:\copy-of-project "add function X to a.py"
 ```
 
-## Тести
+## Tests
 
-Усі тести офлайн (стаб-моделі, без GPU), на тих самих лімітах, що й застосунок:
+About 70 offline test scripts with stub models (no GPU), on the same limits the app uses:
 
 ```powershell
-$env:PYTHONIOENCODING="utf-8"; .venv\Scripts\python.exe tests\run_all.py -j 4
+$env:PYTHONIOENCODING="utf-8"; .venv\Scripts\python tests\run_all.py -j 4
 ```
+
+## Layout
+
+```
+agent/           the agent core (no UI)
+  steploop.py      the single "model → tools" loop (hooks for UI / headless / sub-agent)
+  plan_runner.py   plan execution: steps, planner review, verification, summary
+  planner.py       routing + planning in one structured call
+  toolkit.py       tool registry (search, read_file, replace_in_file, edit_file, run_shell, …)
+  convo.py         lazy conversation summary + verbatim tail
+  literals.py      strip / restore of large literals
+  loopguard.py     loop detector
+  headless.py      the agent without UI (for scripts and task runs)
+lca_web/         Reflex UI (state.py: state + adapters to the core; ui.py: layout)
+scripts/         release, headless task runs, benchmarks
+tests/           offline tests
+docs/            architecture (EN) and developer notes (UK)
+```
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md). Code comments and some docs are in Ukrainian; English PRs and issues are
+fine.
+
+## License
+
+[MIT](LICENSE)

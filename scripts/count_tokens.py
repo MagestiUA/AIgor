@@ -1,6 +1,6 @@
 """Порахувати реальні токени файлу токенізатором gemma через Ollama.
 
-  count_tokens.py <file>
+  python scripts/count_tokens.py <file>
 """
 import sys, requests
 

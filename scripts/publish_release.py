@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-REPO = "MagestiUA/local-code-agent"
+REPO = "MagestiUA/AIgor"
 SOURCES = ("agent", "lca_web", "assets", "main.py", "rxconfig.py", "VERSION", "requirements.txt")
 TEXT_EXT = {".py", ".md", ".txt", ".json", ".toml", ".cfg", ".ini", ".html", ".js", ".css", ".svg", ".yml", ".yaml", ""}
 
