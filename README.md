@@ -14,7 +14,8 @@ model searches instead of reading whole files.
 then a syntax + consistency check and a final summary.*
 
 > **Status:** an actively developed personal project, Windows-first. **The UI is in Ukrainian for now**; the code,
-> prompts and this documentation are usable in English. Issues and PRs are welcome.
+> prompts and this documentation are usable in English. **English localization of the UI is on the roadmap.** If you
+> would use it, open an issue or star the repo, since interest decides the priority. Issues and PRs are welcome.
 
 ## Why
 

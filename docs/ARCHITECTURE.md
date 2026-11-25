@@ -127,7 +127,8 @@ CPU and slow down sharply.
 
 ## 8. Known limitations
 
-- The UI is Ukrainian-only.
+- The UI is Ukrainian-only. English localization is planned: model-facing texts first, then a uk/en switch for the
+  UI and chat messages.
 - Windows-first: `run_shell` is PowerShell 5.1.
 - The verbatim tail is conservative (about 12 messages, each clipped), and compressing an oversized summary can be
   far more aggressive than the requested 50%. Both are being tuned.
