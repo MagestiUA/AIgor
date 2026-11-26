@@ -62,11 +62,77 @@ def _virtual_screen() -> tuple[int, int, int, int] | None:
         return None
 
 
-def sane_geometry(geo: dict, screen: tuple[int, int, int, int] | None) -> dict:
+def _monitors() -> list[tuple[int, int, int, int, bool]] | None:
+    """Робочі області всіх моніторів (x, y, w, h, основний?) — у тих самих координатах, що й позиція вікна (той самий
+    процес, той самий DPI-контекст). Без панелі задач. None, якщо дізнатись не вдалось (не Windows)."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", wintypes.RECT), ("rcWork", wintypes.RECT),
+                        ("dwFlags", wintypes.DWORD)]
+
+        out: list = []
+        proc_t = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HANDLE, wintypes.HDC, ctypes.POINTER(wintypes.RECT),
+                                    wintypes.LPARAM)
+
+        def cb(hmon, _hdc, _rect, _lp):
+            mi = MONITORINFO()
+            mi.cbSize = ctypes.sizeof(MONITORINFO)
+            if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                r = mi.rcWork
+                out.append((r.left, r.top, r.right - r.left, r.bottom - r.top, bool(mi.dwFlags & 1)))
+            return True
+
+        user32.EnumDisplayMonitors(None, None, proc_t(cb), 0)
+        return out or None
+    except Exception:
+        return None
+
+
+TITLE_H = 32           # висота рядка заголовка, за який вікно можна схопити й перетягнути
+
+
+def title_on_screen(geo: dict, monitors) -> bool:
+    """Чи видно рядок заголовка (без кнопок праворуч) хоча б на одному моніторі настільки, щоб схопити вікно мишею.
+    Перевіряємо МОНІТОРИ, а не їхній спільний прямокутник: монітори різного розміру лишають «мертві зони» (вікно з
+    кутом під нижнім краєм верхнього монітора й праворуч від основного — у прямокутнику, але на жодному екрані)."""
+    x, y, w = int(geo["x"]), int(geo["y"]), int(geo["width"])
+    left, right = x + 8, max(x + 8 + 40, x + w - 140)           # 140 px праворуч — кнопки «згорнути/закрити»
+    top, bottom = y, y + TITLE_H
+    need_w = min(100, right - left)
+    for mx, my, mw, mh, _primary in monitors:
+        iw = min(right, mx + mw) - max(left, mx)
+        ih = min(bottom, my + mh) - max(top, my)
+        if iw >= need_w and ih >= 16:
+            return True
+    return False
+
+
+def _primary(monitors) -> tuple[int, int, int, int]:
+    for mx, my, mw, mh, primary in monitors:
+        if primary:
+            return mx, my, mw, mh
+    mx, my, mw, mh, _ = monitors[0]
+    return mx, my, mw, mh
+
+
+def centered_on_primary(geo: dict, monitors) -> dict:
+    """Вікно по центру робочої області основного монітора, зменшене так, щоб на нього влізти (з полями)."""
+    px, py, pw, ph = _primary(monitors)
+    w = max(min(int(geo["width"]), pw - 40), min(MIN_WINDOW[0], pw))
+    h = max(min(int(geo["height"]), ph - 40), min(MIN_WINDOW[1], ph))
+    return {**geo, "width": w, "height": h, "x": px + max(0, (pw - w) // 2), "y": py + max(0, (ph - h) // 2)}
+
+
+def sane_geometry(geo: dict, screen: tuple[int, int, int, int] | None, monitors=None) -> dict:
     """Геометрія, з якою вікно гарантовано з'явиться на екрані. Мінімізоване вікно Windows віддає координати
     ≈ -25600 і мізерний розмір — їх не можна запам'ятовувати (вікно «запущене», але ніде не видно).
-    Розмір — не менший за min_size; координати лишаємо лише якщо верхній лівий кут вікна (з запасом 60 px
-    під заголовок) всередині монітора, інакше x/y скидаємо — система розмістить вікно сама."""
+    Розмір — не менший за min_size. Якщо відомі монітори — позицію лишаємо лише коли рядок заголовка видно на одному
+    з них (title_on_screen), інакше ставимо вікно по центру основного монітора (і зменшуємо, якщо не влазить).
+    Без моніторів — давня перевірка: верхній лівий кут (з запасом 60 px) всередині спільного прямокутника екранів."""
     g = dict(geo)
     w, h = int(g.get("width") or 0), int(g.get("height") or 0)
     if w < MIN_WINDOW[0] or h < MIN_WINDOW[1]:               # сміттєвий (згорнутий) розмір — беремо типовий
@@ -75,6 +141,13 @@ def sane_geometry(geo: dict, screen: tuple[int, int, int, int] | None) -> dict:
     x, y = g.get("x"), g.get("y")
     if x is None or y is None:
         g["x"] = g["y"] = None
+        if monitors:
+            px, py, pw, ph = _primary(monitors)
+            if w > pw or h > ph:                             # без позиції, але більше за основний монітор — зменшуємо
+                g = centered_on_primary(g, monitors)
+    elif monitors:
+        if not title_on_screen(g, monitors):
+            g = centered_on_primary(g, monitors)
     elif screen:
         sx, sy, sw, sh = screen
         if not (sx - 20 <= x <= sx + sw - 60 and sy - 20 <= y <= sy + sh - 60):
@@ -87,7 +160,7 @@ def sane_geometry(geo: dict, screen: tuple[int, int, int, int] | None) -> dict:
 def _load_geometry() -> dict:
     try:
         d = json.loads(WINDOW_FILE.read_text(encoding="utf-8"))
-        return sane_geometry({**DEFAULT_GEOMETRY, **d}, _virtual_screen())
+        return sane_geometry({**DEFAULT_GEOMETRY, **d}, _virtual_screen(), _monitors())
     except Exception:
         return dict(DEFAULT_GEOMETRY)
 
@@ -98,6 +171,9 @@ def _save_geometry(window) -> None:
         # мінімізоване/згорнуте вікно: координати ≈ -25600 і крихітний розмір — не зберігаємо, лишаємо попереднє
         if g["x"] is None or g["y"] is None or g["x"] <= -10000 or g["y"] <= -10000 \
                 or g["width"] < MIN_WINDOW[0] or g["height"] < MIN_WINDOW[1]:
+            return
+        mons = _monitors()
+        if mons and not title_on_screen(g, mons):             # заголовок поза моніторами — таку позицію не запам'ятовуємо
             return
         WINDOW_FILE.parent.mkdir(parents=True, exist_ok=True)
         WINDOW_FILE.write_text(json.dumps(g, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -241,22 +317,29 @@ def _open_window(url: str, log) -> None:
         except Exception:                                   # noqa: BLE001
             pass
     def _ensure_visible(*_a) -> None:
-        """Після показу: якщо вікно реально поза всіма моніторами (збережені/системні координати зламані) —
-        повертаємо в центр основного монітора. Страхує там, де перевірка геометрії до запуску не спрацювала."""
+        """Після показу: якщо рядок заголовка не видно на жодному моніторі (збережені/системні координати зламані,
+        «мертва зона» між моніторами різного розміру) — ставимо вікно по центру основного монітора й зменшуємо до нього.
+        Страхує там, де перевірка геометрії до запуску не спрацювала."""
         try:
             x, y, w, h = window.x, window.y, window.width, window.height
             if x is None or y is None:
                 return
-            scr = _virtual_screen()
-            if sane_geometry({"width": w, "height": h, "x": x, "y": y}, scr)["x"] is not None:
-                return
-            import ctypes
-            pw, ph = ctypes.windll.user32.GetSystemMetrics(0), ctypes.windll.user32.GetSystemMetrics(1)
-            nw, nh = min(max(w, MIN_WINDOW[0]), pw), min(max(h, MIN_WINDOW[1]), ph)
-            log.warning("вікно поза екраном (x=%s y=%s %sx%s, екран=%s) — переношу в центр основного монітора %sx%s",
-                        x, y, w, h, scr, pw, ph)
-            window.resize(nw, nh)
-            window.move(max(0, (pw - nw) // 2), max(0, (ph - nh) // 2))
+            mons = _monitors()
+            geo = {"width": w, "height": h, "x": x, "y": y}
+            if mons:
+                if title_on_screen(geo, mons):
+                    return
+                fixed = centered_on_primary(geo, mons)
+            else:
+                if sane_geometry(geo, _virtual_screen())["x"] is not None:
+                    return
+                import ctypes
+                pw, ph = ctypes.windll.user32.GetSystemMetrics(0), ctypes.windll.user32.GetSystemMetrics(1)
+                fw, fh = min(max(w, MIN_WINDOW[0]), pw), min(max(h, MIN_WINDOW[1]), ph)
+                fixed = {"width": fw, "height": fh, "x": max(0, (pw - fw) // 2), "y": max(0, (ph - fh) // 2)}
+            log.warning("вікно поза екраном (x=%s y=%s %sx%s, монітори=%s) — переношу: %s", x, y, w, h, mons, fixed)
+            window.resize(fixed["width"], fixed["height"])
+            window.move(fixed["x"], fixed["y"])
         except Exception:                                   # noqa: BLE001
             log.exception("не вдалося перевірити/повернути вікно в межі екрана")
     window.events.shown += _ensure_visible
