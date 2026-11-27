@@ -298,6 +298,38 @@ def _main() -> None:
     plan = make_plan(2)
     run(ui, plan)
     assert ui.run_log == [] and ui.has_pending and ui.notes[-1].startswith("⛔ Зупинено")
+    # 18) планувальник після кроку 1 бачить, що крок зробив і роботу кроків 2–3 → «done»: решту пропущено, план завершено
+    #     звіркою й підсумком, БЕЗ «Виконати план» (раніше модель обирала «stop», і план зависав як незавершений)
+    ui = FakeUI(root, ok_script)
+    plan = make_plan(3)
+    out = run(ui, plan, client=Planner([{"action": "done", "comment": "Крок 1 уже зробив і кроки 2–3 — задачу виконано."}]))
+    assert len(ui.run_log) == 1 and [s.status for s in plan.steps] == ["done"] * 3, ui.run_log
+    assert plan.steps[1].result.startswith("⏭ пропущено") and plan.steps[2].result.startswith("⏭ пропущено")
+    assert not ui.has_pending and ui.notes[-1] == "Готово ✓", ui.notes[-3:]
+    assert any(n.startswith("⏭ Пропускаю кроки #2, #3") for n in ui.notes)
+    assert any(n.startswith("💭 Крок 1 уже зробив") for n in ui.notes) and "Звірка: ок" in out
+    # «stop» і далі означає «потрібен користувач»: пауза з планом для відновлення
+    ui = FakeUI(root, ok_script)
+    plan = make_plan(3)
+    run(ui, plan, client=Planner([{"action": "stop", "comment": "Який порт використати?"}]))
+    assert ui.has_pending and [s.status for s in plan.steps] == ["done", "pending", "pending"]
+    # промпт: done описано, stop заборонено для «готово»
+    assert '"done"' in review.REVIEW_SYSTEM and "NEVER use stop to say the task is done" in review.REVIEW_SYSTEM
+    assert "done" in review.REVIEW_SCHEMA["properties"]["action"]["enum"] and review.parse_decision('{"action": "done", "comment": "x"}').action == "done"
+
+    # 19) «done» на ПРОМІЖНІЙ перевірці посеред кроку — крок не обривається (виконавець його завершує), пропуск — після кроку
+    class CheckpointUI(FakeUI):
+        async def run_step(self, step_text, *, title, context, checkpoint=None):
+            if checkpoint and step_text == "крок 1":
+                self.cp_dec = await checkpoint([("run_shell", {"command": "x"}, "ok")])
+            return await super().run_step(step_text, title=title, context=context, checkpoint=checkpoint)
+
+    ui = CheckpointUI(root, ok_script)
+    plan = make_plan(2)
+    run(ui, plan, client=Planner([{"action": "done", "comment": "Схоже, усе вже готово."},     # посеред кроку 1
+                                  {"action": "done", "comment": "Так, задачу виконано."}]))   # після кроку 1
+    assert ui.cp_dec.action == "continue" and len(ui.run_log) == 1 and not ui.has_pending, (ui.cp_dec, ui.run_log)
+    assert [s.status for s in plan.steps] == ["done", "done"] and plan.steps[1].result.startswith("⏭")
     print("OK: orchestration_flow — PlanRunner: результати між кроками, зупинка/відновлення, звірка й обмежені повтори, "
           "перегляд планувальником, коментарі по ходу, примітки, стоп")
 

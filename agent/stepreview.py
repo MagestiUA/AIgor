@@ -71,7 +71,7 @@ def facts_report(actions: list[tuple[str, dict, str]]) -> str:
 
 @dataclass
 class Decision:
-    action: str = "continue"                         # continue | revise | stop
+    action: str = "continue"                         # continue | revise | done | stop
     comment: str = ""                                # 1–2 речення для чату
     revise: dict[int, str] = field(default_factory=dict)    # step_id -> новий опис (лише невиконані / цей крок)
     add_steps: list[str] = field(default_factory=list)      # нові кроки в кінець плану
@@ -81,12 +81,15 @@ REVIEW_SYSTEM = (
     "You are the PLANNER. An executor just finished ONE step of your plan and reported EXACT FACTS: "
     "the commands it ran with their real output and the files it changed. Judge by those facts, not "
     "by the executor's wording. Reply ONLY as JSON: "
-    '{"action": "continue"|"revise"|"stop", "comment": "...", "revise": [{"step_id": N, "description": "..."}], '
+    '{"action": "continue"|"revise"|"done"|"stop", "comment": "...", "revise": [{"step_id": N, "description": "..."}], '
     '"add_steps": ["..."]}. '
     "continue = the plan stays as is. revise = change descriptions of NOT-yet-done steps (and, if the "
     "step just FAILED, you may re-describe that same step to try a different approach) and/or append "
-    "new steps in add_steps. stop = you need input from the user or the task is impossible; explain why "
-    "in comment. Never touch steps already marked done. Be conservative: if the facts show the step did "
+    "new steps in add_steps. done = the facts show the WHOLE task is already complete (e.g. this step also did what "
+    "the remaining steps were meant to do): the remaining steps are skipped and the run finishes with a check and a "
+    "summary - say in comment why they are not needed. stop = ONLY when you need input or a decision from the user, or "
+    "the task is impossible; explain why in comment. NEVER use stop to say the task is done - use done. "
+    "Never touch steps already marked done. Be conservative: if the facts show the step did "
     "what it was asked (e.g. exit code 0, expected output), choose continue — do not re-plan because of "
     "wording. If a USER COMMENT is given, it has priority: the user watched the work live and is correcting "
     "you — adapt the plan to it (revise pending steps / add steps), and acknowledge it in comment. "
@@ -95,7 +98,8 @@ REVIEW_SYSTEM = (
     "(one command / one file), and do not repeat the approach that looped. "
     "If the status says the step is STILL IN PROGRESS (interim check after several actions): continue = the "
     "executor is on track (comment may give it a short hint); revise = the approach is wrong or the step is too "
-    "big - re-describe THIS step (smaller / different approach) and/or add steps; stop = you need the user. "
+    "big - re-describe THIS step (smaller / different approach) and/or add steps; stop = you need the user; if the "
+    "whole task already looks complete, choose continue and tell the executor to finish the step. "
     "comment: 1-2 short sentences in the user's language, first person, saying what happened "
     "(cite the command and its key output when it matters) and what you do next."
 )
@@ -103,7 +107,7 @@ REVIEW_SYSTEM = (
 REVIEW_SCHEMA = {
     "type": "object",
     "properties": {
-        "action": {"type": "string", "enum": ["continue", "revise", "stop"]},
+        "action": {"type": "string", "enum": ["continue", "revise", "done", "stop"]},
         "comment": {"type": "string"},
         "revise": {"type": "array", "items": {"type": "object", "properties": {
             "step_id": {"type": "integer"}, "description": {"type": "string"}},
@@ -135,7 +139,7 @@ def parse_decision(content: str) -> Decision:
         return Decision()
     if not isinstance(d, dict):
         return Decision()
-    action = d.get("action") if d.get("action") in ("continue", "revise", "stop") else "continue"
+    action = d.get("action") if d.get("action") in ("continue", "revise", "done", "stop") else "continue"
     rev: dict[int, str] = {}
     for r in d.get("revise") or []:
         try:

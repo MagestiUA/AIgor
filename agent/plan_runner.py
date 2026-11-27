@@ -151,6 +151,8 @@ class PlanRunner:
                 _step.report = review.facts_report(acts)
                 may_cp = bool(live) or replans < review.MAX_REPLANS
                 dec = await self.review(plan, _step, None, "", may_cp, live)
+                if dec.action == "done":         # посеред кроку «усе вже готово» — хай виконавець завершить крок,
+                    dec.action = "continue"      # а пропуск решти вирішимо після кроку (коментар піде виконавцю)
                 if dec.action != "continue":
                     _h["dec"] = dec
                 return dec
@@ -179,13 +181,24 @@ class PlanRunner:
                     replans += 1
                     if step.status == "pending":               # невдалий крок переписано — пробуємо знову
                         continue
-                if (not ok and dec.action == "continue" and dec.comment and (final or "").strip()
+                if (not ok and dec.action in ("continue", "done") and dec.comment and (final or "").strip()
                         and not is_incomplete(final) and not step.report.strip()):
                     # Крок без жодної дії (напр. «виправ помилки, якщо є» — помилок нема): правило «без дій = невдача»
                     # ловить вигадане виконання, але планувальник бачив факти (дій не було) і текст виконавця й прийняв
                     # крок («continue» з поясненням). Ліміт/зациклення/контекст сюди не потрапляють (is_incomplete).
                     plan.set_result(step.id, "done", final)
                     ok = True
+                if dec.action == "done" and ok:
+                    # Планувальник бачить, що задачу вже виконано (крок зробив і роботу наступних): решту кроків
+                    # пропускаємо й завершуємо звичайним шляхом — звірка, підсумок, «Готово». Раніше для цього був лише
+                    # «stop», і план зависав як незавершений із кнопкою «Виконати план».
+                    skipped = [s for s in plan.steps if s.status != "done"]
+                    for s in skipped:
+                        plan.set_result(s.id, "done", "⏭ пропущено: задачу вже виконано попередніми кроками")
+                    if skipped:
+                        await self.ui.say("⏭ Пропускаю кроки " + ", ".join(f"#{s.id}" for s in skipped)
+                                          + " — задачу вже виконано попередніми кроками.")
+                    break
                 if dec.action == "stop" and ok:
                     await self.ui.save_pending(plan)
                     return render_for_planner(plan)
