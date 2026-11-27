@@ -769,20 +769,17 @@ class State(rx.State):
         return [s for s in base if (s.get("project_id") or "") == self.current_project_id]
 
     def _recent_image_urls(self) -> list[str]:
-        """Картинки для моделі (data-URL): із двох останніх повідомлень користувача, що мають зображення, не більше
-        images.MAX_IMAGES_PER_REQUEST. Викликати всередині `async with self` (читає self.messages)."""
+        """Картинки для моделі (data-URL) — лише з ДВОХ ОСТАННІХ повідомлень користувача (поточне й попереднє: уточнення
+        до щойно надісланого скріншота теж його бачить), не більше images.MAX_IMAGES_PER_REQUEST. Викликати всередині
+        `async with self` (читає self.messages).
+        Раніше бралися дві останні ГРУПИ картинок у всій історії, хоч би якими старими вони були: скріншот, надісланий
+        сотню повідомлень тому, чіплявся до кожного нового запиту, і модель відповідала на нього, а не на питання (живий
+        кейс: «помилка в іншому місці, я виправив сам» → відповідь про скріншоти Defender зі 126 повідомлень тому)."""
         if not self.current_id:
             return []
-        groups, names = 0, []
-        for m in reversed(list(self.messages)):
-            if m.get("role") != "user":
-                continue
-            ims = [n for n in (m.get("attachments") or []) if images.is_image_name(n)]
-            if ims:
-                names = ims + names
-                groups += 1
-                if groups >= 2:
-                    break
+        names: list[str] = []
+        for m in [m for m in self.messages if m.get("role") == "user"][-2:]:
+            names += [n for n in (m.get("attachments") or []) if images.is_image_name(n)]
         return images.data_urls(A.session_dir(self.current_id), names)
 
     def _attachments_note(self) -> str:

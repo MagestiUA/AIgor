@@ -161,15 +161,23 @@ def main() -> None:
         bad = next(a for a in st.attachments if a["name"] == "fake.png")
         assert "не зображення" in bad["error"] and bad["image"]
 
-        # 10) які картинки йдуть моделі: з двох останніх повідомлень користувача, що їх мають
+        # 10) які картинки йдуть моделі: лише з ДВОХ ОСТАННІХ повідомлень користувача (поточне + попереднє)
         class Msg:
             current_id = "S3"
             messages = [{"role": "user", "attachments": ["p0.png"]}, {"role": "assistant", "attachments": []},
                         {"role": "user", "attachments": ["p1.png", "note.txt"]}, {"role": "user", "attachments": ["p2.png"]},
                         {"role": "user", "attachments": []}]
         got = types.MethodType(W.State._recent_image_urls, Msg())()
-        want = I.data_urls(A.session_dir("S3"), ["p1.png", "p2.png"])
-        assert got == want and len(got) == 2, len(got)
+        want = I.data_urls(A.session_dir("S3"), ["p2.png"])                 # попереднє повідомлення; давніші — ні
+        assert got == want and len(got) == 1, len(got)
+        # регресія: скріншоти давно в історії НЕ чіпляються до нового повідомлення без картинок
+        Msg.messages = ([{"role": "user", "attachments": ["p0.png", "p1.png"]}]
+                        + [{"role": r, "attachments": []} for r in ("assistant", "user", "assistant", "user")])
+        assert types.MethodType(W.State._recent_image_urls, Msg())() == []
+        # поточне повідомлення з картинкою + попереднє з картинкою — обидві (уточнення до щойно надісланого скріншота)
+        Msg.messages = [{"role": "user", "attachments": ["p1.png"]}, {"role": "assistant", "attachments": []},
+                        {"role": "user", "attachments": ["p2.png"]}]
+        assert types.MethodType(W.State._recent_image_urls, Msg())() == I.data_urls(A.session_dir("S3"), ["p1.png", "p2.png"])
         Msg.current_id = ""
         assert types.MethodType(W.State._recent_image_urls, Msg())() == []
     finally:
